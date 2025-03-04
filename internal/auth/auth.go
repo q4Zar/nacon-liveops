@@ -5,7 +5,6 @@ import (
     "errors"
     "net/http"
 
-    "github.com/go-chi/chi/v5/middleware"
     "google.golang.org/grpc"
     "google.golang.org/grpc/metadata"
 )

@@ -10,12 +10,13 @@ import (
     "testing"
     "time"
 
+    "github.com/go-chi/chi/v5"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/mock"
     "google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// MockEventRepository for testing
+// MockEventRepository mocks the db.EventRepository interface
 type MockEventRepository struct {
     mock.Mock
 }
@@ -50,93 +51,218 @@ func (m *MockEventRepository) ListEvents() ([]db.Event, error) {
     return args.Get(0).([]db.Event), args.Error(1)
 }
 
-func TestGetActiveEvents(t *testing.T) {
+// Test Suite
+func TestService(t *testing.T) {
+    // Setup mock repository
     mockRepo := new(MockEventRepository)
     svc := NewService(mockRepo)
 
-    events := []db.Event{{
-        ID:          "1",
-        Title:       "Event 1",
-        Description: "Desc 1",
-        StartTime:   timestamppb.Now(),
-        EndTime:     timestamppb.New(time.Now().Add(time.Hour)),
-        Rewards:     `{"gold": 100}`,
-    }}
-    mockRepo.On("GetActiveEvents").Return(events, nil)
-
-    rr := httptest.NewRecorder()
-    req := httptest.NewRequest("GET", "/events", nil)
-    svc.GetActiveEvents(rr, req)
-
-    assert.Equal(t, http.StatusOK, rr.Code)
-    assert.Contains(t, rr.Body.String(), `"title":"Event 1"`)
-    mockRepo.AssertExpectations(t)
-}
-
-func TestGetEvent(t *testing.T) {
-    mockRepo := new(MockEventRepository)
-    svc := NewService(mockRepo)
-
-    event := db.Event{
-        ID:          "1",
-        Title:       "Event 1",
-        Description: "Desc 1",
+    // Sample event for testing
+    sampleEvent := db.Event{
+        ID:          "evt1",
+        Title:       "Test Event",
+        Description: "A test event",
         StartTime:   timestamppb.Now(),
         EndTime:     timestamppb.New(time.Now().Add(time.Hour)),
         Rewards:     `{"gold": 100}`,
     }
-    mockRepo.On("GetEvent", "1").Return(event, nil)
-    mockRepo.On("GetEvent", "2").Return(db.Event{}, sql.ErrNoRows)
 
-    tests := []struct {
-        name           string
-        id             string
-        expectedStatus int
-    }{{
-        name:           "Valid Event",
-        id:             "1",
-        expectedStatus: http.StatusOK,
-    }, {
-        name:           "Event Not Found",
-        id:             "2",
-        expectedStatus: http.StatusNotFound,
-    }}
+    // Test GetActiveEvents
+    t.Run("GetActiveEvents_Success", func(t *testing.T) {
+        mockRepo.On("GetActiveEvents").Return([]db.Event{sampleEvent}, nil).Once()
 
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            rr := httptest.NewRecorder()
-            req := httptest.NewRequest("GET", "/events/"+tt.id, nil)
-            req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, &chi.Context{
-                URLParams: map[string]string{"id": tt.id},
-            }))
-            svc.GetEvent(rr, req)
+        rr := httptest.NewRecorder()
+        req := httptest.NewRequest("GET", "/events", nil)
+        svc.GetActiveEvents(rr, req)
 
-            assert.Equal(t, tt.expectedStatus, rr.Code)
-            if tt.expectedStatus == http.StatusOK {
-                assert.Contains(t, rr.Body.String(), `"title":"Event 1"`)
-            }
-        })
-    }
-    mockRepo.AssertExpectations(t)
-}
+        assert.Equal(t, http.StatusOK, rr.Code)
+        assert.Contains(t, rr.Body.String(), `"title":"Test Event"`)
+        assert.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+        mockRepo.AssertExpectations(t)
+    })
 
-func TestCreateEvent(t *testing.T) {
-    mockRepo := new(MockEventRepository)
-    svc := NewService(mockRepo)
+    t.Run("GetActiveEvents_Error", func(t *testing.T) {
+        mockRepo.On("GetActiveEvents").Return([]db.Event{}, sql.ErrConnDone).Once()
 
-    req := &api.EventRequest{
-        Id:          "1",
-        Title:       "Event 1",
-        Description: "Desc 1",
-        StartTime:   timestamppb.Now(),
-        EndTime:     timestamppb.New(time.Now().Add(time.Hour)),
-        Rewards:     `{"gold": 100}`,
-    }
-    mockRepo.On("CreateEvent", mock.AnythingOfType("db.Event")).Return(nil)
+        rr := httptest.NewRecorder()
+        req := httptest.NewRequest("GET", "/events", nil)
+        svc.GetActiveEvents(rr, req)
 
-    resp, err := svc.CreateEvent(context.Background(), req)
+        assert.Equal(t, http.StatusInternalServerError, rr.Code)
+        assert.Contains(t, rr.Body.String(), `"error":"internal server error"`)
+        mockRepo.AssertExpectations(t)
+    })
 
-    assert.NoError(t, err)
-    assert.Equal(t, "Event 1", resp.Title)
-    mockRepo.AssertExpectations(t)
+    // Test GetEvent
+    t.Run("GetEvent_Success", func(t *testing.T) {
+        mockRepo.On("GetEvent", "evt1").Return(sampleEvent, nil).Once()
+
+        rr := httptest.NewRecorder()
+        req := httptest.NewRequest("GET", "/events/evt1", nil)
+        req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, &chi.Context{
+            URLParams: map[string]string{"id": "evt1"},
+        }))
+        svc.GetEvent(rr, req)
+
+        assert.Equal(t, http.StatusOK, rr.Code)
+        assert.Contains(t, rr.Body.String(), `"title":"Test Event"`)
+        mockRepo.AssertExpectations(t)
+    })
+
+    t.Run("GetEvent_NotFound", func(t *testing.T) {
+        mockRepo.On("GetEvent", "evt2").Return(db.Event{}, sql.ErrNoRows).Once()
+
+        rr := httptest.NewRecorder()
+        req := httptest.NewRequest("GET", "/events/evt2", nil)
+        req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, &chi.Context{
+            URLParams: map[string]string{"id": "evt2"},
+        }))
+        svc.GetEvent(rr, req)
+
+        assert.Equal(t, http.StatusNotFound, rr.Code)
+        assert.Contains(t, rr.Body.String(), `"error":"event not found"`)
+        mockRepo.AssertExpectations(t)
+    })
+
+    t.Run("GetEvent_InvalidID", func(t *testing.T) {
+        rr := httptest.NewRecorder()
+        req := httptest.NewRequest("GET", "/events/", nil)
+        req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, &chi.Context{
+            URLParams: map[string]string{"id": ""},
+        }))
+        svc.GetEvent(rr, req)
+
+        assert.Equal(t, http.StatusBadRequest, rr.Code)
+        assert.Contains(t, rr.Body.String(), `"error":"missing event id"`)
+    })
+
+    // Test CreateEvent
+    t.Run("CreateEvent_Success", func(t *testing.T) {
+        req := &api.EventRequest{
+            Id:          "evt1",
+            Title:       "Test Event",
+            Description: "A test event",
+            StartTime:   sampleEvent.StartTime.AsTime().Unix(),
+            EndTime:     sampleEvent.EndTime.AsTime().Unix(),
+            Rewards:     `{"gold": 100}`,
+        }
+        mockRepo.On("CreateEvent", mock.AnythingOfType("db.Event")).Return(nil).Once()
+
+        resp, err := svc.CreateEvent(context.Background(), req)
+
+        assert.NoError(t, err)
+        assert.NotNil(t, resp)
+        assert.Equal(t, "evt1", resp.Id)
+        assert.Equal(t, "Test Event", resp.Title)
+        assert.Equal(t, req.StartTime, resp.StartTime)
+        mockRepo.AssertExpectations(t)
+    })
+
+    t.Run("CreateEvent_Error", func(t *testing.T) {
+        req := &api.EventRequest{
+            Id:          "evt1",
+            Title:       "Test Event",
+            Description: "A test event",
+            StartTime:   sampleEvent.StartTime.AsTime().Unix(),
+            EndTime:     sampleEvent.EndTime.AsTime().Unix(),
+            Rewards:     `{"gold": 100}`,
+        }
+        mockRepo.On("CreateEvent", mock.AnythingOfType("db.Event")).Return(sql.ErrConnDone).Once()
+
+        resp, err := svc.CreateEvent(context.Background(), req)
+
+        assert.Error(t, err)
+        assert.Nil(t, resp)
+        assert.Equal(t, sql.ErrConnDone, err)
+        mockRepo.AssertExpectations(t)
+    })
+
+    // Test UpdateEvent
+    t.Run("UpdateEvent_Success", func(t *testing.T) {
+        req := &api.EventRequest{
+            Id:          "evt1",
+            Title:       "Updated Event",
+            Description: "Updated desc",
+            StartTime:   sampleEvent.StartTime.AsTime().Unix(),
+            EndTime:     sampleEvent.EndTime.AsTime().Unix(),
+            Rewards:     `{"gold": 200}`,
+        }
+        mockRepo.On("UpdateEvent", mock.AnythingOfType("db.Event")).Return(nil).Once()
+
+        resp, err := svc.UpdateEvent(context.Background(), req)
+
+        assert.NoError(t, err)
+        assert.NotNil(t, resp)
+        assert.Equal(t, "Updated Event", resp.Title)
+        assert.Equal(t, "Updated desc", resp.Description)
+        mockRepo.AssertExpectations(t)
+    })
+
+    t.Run("UpdateEvent_Error", func(t *testing.T) {
+        req := &api.EventRequest{
+            Id:          "evt1",
+            Title:       "Updated Event",
+            Description: "Updated desc",
+            StartTime:   sampleEvent.StartTime.AsTime().Unix(),
+            EndTime:     sampleEvent.EndTime.AsTime().Unix(),
+            Rewards:     `{"gold": 200}`,
+        }
+        mockRepo.On("UpdateEvent", mock.AnythingOfType("db.Event")).Return(sql.ErrNoRows).Once()
+
+        resp, err := svc.UpdateEvent(context.Background(), req)
+
+        assert.Error(t, err)
+        assert.Nil(t, resp)
+        assert.Equal(t, sql.ErrNoRows, err)
+        mockRepo.AssertExpectations(t)
+    })
+
+    // Test DeleteEvent
+    t.Run("DeleteEvent_Success", func(t *testing.T) {
+        req := &api.DeleteRequest{Id: "evt1"}
+        mockRepo.On("DeleteEvent", "evt1").Return(nil).Once()
+
+        resp, err := svc.DeleteEvent(context.Background(), req)
+
+        assert.NoError(t, err)
+        assert.NotNil(t, resp)
+        mockRepo.AssertExpectations(t)
+    })
+
+    t.Run("DeleteEvent_Error", func(t *testing.T) {
+        req := &api.DeleteRequest{Id: "evt1"}
+        mockRepo.On("DeleteEvent", "evt1").Return(sql.ErrNoRows).Once()
+
+        resp, err := svc.DeleteEvent(context.Background(), req)
+
+        assert.Error(t, err)
+        assert.Nil(t, resp)
+        assert.Equal(t, sql.ErrNoRows, err)
+        mockRepo.AssertExpectations(t)
+    })
+
+    // Test ListEvents
+    t.Run("ListEvents_Success", func(t *testing.T) {
+        mockRepo.On("ListEvents").Return([]db.Event{sampleEvent}, nil).Once()
+
+        resp, err := svc.ListEvents(context.Background(), &api.Empty{})
+
+        assert.NoError(t, err)
+        assert.NotNil(t, resp)
+        assert.Len(t, resp.Events, 1)
+        assert.Equal(t, "Test Event", resp.Events[0].Title)
+        assert.Equal(t, sampleEvent.StartTime.AsTime().Unix(), resp.Events[0].StartTime)
+        mockRepo.AssertExpectations(t)
+    })
+
+    t.Run("ListEvents_Error", func(t *testing.T) {
+        mockRepo.On("ListEvents").Return([]db.Event{}, sql.ErrConnDone).Once()
+
+        resp, err := svc.ListEvents(context.Background(), &api.Empty{})
+
+        assert.Error(t, err)
+        assert.Nil(t, resp)
+        assert.Equal(t, sql.ErrConnDone, err)
+        mockRepo.AssertExpectations(t)
+    })
 }

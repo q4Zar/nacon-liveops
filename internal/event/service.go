@@ -7,17 +7,22 @@ import (
     "liveops/api"
     "liveops/internal/db"
     "net/http"
+    "time"
 
     "github.com/go-chi/chi/v5"
+    "golang.org/x/sync/errgroup"
     "google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Service struct {
+    api.UnimplementedLiveOpsServiceServer // Embed this to satisfy the interface
     repo *db.EventRepository
 }
 
 func NewService(repo *db.EventRepository) *Service {
-    return &Service{repo: repo}
+    return &Service{
+        repo: repo,
+    }
 }
 
 func (s *Service) GetActiveEvents(w http.ResponseWriter, r *http.Request) {
@@ -27,10 +32,36 @@ func (s *Service) GetActiveEvents(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    w.Header().Set("Content-Type", "application/json")
-    if err := json.NewEncoder(w).Encode(events); err != nil {
-        http.Error(w, `{"error": "failed to encode response"}`, http.StatusInternalServerError)
+    var g errgroup.Group
+    g.SetLimit(4)
+    result := make([][]byte, len(events))
+
+    for i, e := range events {
+        i, e := i, e
+        g.Go(func() error {
+            data, err := json.Marshal(e)
+            if err != nil {
+                return err
+            }
+            result[i] = data
+            return nil
+        })
     }
+
+    if err := g.Wait(); err != nil {
+        http.Error(w, `{"error": "failed to encode response"}`, http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.Write([]byte("["))
+    for i, data := range result {
+        if i > 0 {
+            w.Write([]byte(","))
+        }
+        w.Write(data)
+    }
+    w.Write([]byte("]"))
 }
 
 func (s *Service) GetEvent(w http.ResponseWriter, r *http.Request) {
@@ -61,8 +92,8 @@ func (s *Service) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.
         ID:          req.Id,
         Title:       req.Title,
         Description: req.Description,
-        StartTime:   req.StartTime,
-        EndTime:     req.EndTime,
+        StartTime:   timestamppb.New(time.Unix(req.GetStartTime(), 0)),
+        EndTime:     timestamppb.New(time.Unix(req.GetEndTime(), 0)),
         Rewards:     req.Rewards,
     }
 
@@ -74,8 +105,8 @@ func (s *Service) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.
         Id:          event.ID,
         Title:       event.Title,
         Description: event.Description,
-        StartTime:   event.StartTime,
-        EndTime:     event.EndTime,
+        StartTime:   event.StartTime.AsTime().Unix(),
+        EndTime:     event.EndTime.AsTime().Unix(),
         Rewards:     event.Rewards,
     }, nil
 }
@@ -85,8 +116,8 @@ func (s *Service) UpdateEvent(ctx context.Context, req *api.EventRequest) (*api.
         ID:          req.Id,
         Title:       req.Title,
         Description: req.Description,
-        StartTime:   req.StartTime,
-        EndTime:     req.EndTime,
+        StartTime:   timestamppb.New(time.Unix(req.GetStartTime(), 0)),
+        EndTime:     timestamppb.New(time.Unix(req.GetEndTime(), 0)),
         Rewards:     req.Rewards,
     }
 
@@ -98,8 +129,8 @@ func (s *Service) UpdateEvent(ctx context.Context, req *api.EventRequest) (*api.
         Id:          event.ID,
         Title:       event.Title,
         Description: event.Description,
-        StartTime:   event.StartTime,
-        EndTime:     event.EndTime,
+        StartTime:   event.StartTime.AsTime().Unix(),
+        EndTime:     event.EndTime.AsTime().Unix(),
         Rewards:     event.Rewards,
     }, nil
 }
@@ -123,8 +154,8 @@ func (s *Service) ListEvents(ctx context.Context, req *api.Empty) (*api.EventsRe
             Id:          e.ID,
             Title:       e.Title,
             Description: e.Description,
-            StartTime:   e.StartTime,
-            EndTime:     e.EndTime,
+            StartTime:   e.StartTime.AsTime().Unix(),
+            EndTime:     e.EndTime.AsTime().Unix(),
             Rewards:     e.Rewards,
         })
     }

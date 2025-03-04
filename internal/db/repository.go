@@ -3,6 +3,7 @@ package db
 import (
     "database/sql"
     "log"
+    "sync"
     "time"
 
     "google.golang.org/protobuf/types/known/timestamppb"
@@ -20,12 +21,23 @@ type Event struct {
 type EventRepository struct {
     db      *sql.DB
     writeCh chan func() error
+    readPool *sync.Pool // Pool for read-only connections
 }
 
 func NewEventRepository(db *sql.DB) *EventRepository {
     repo := &EventRepository{
         db:      db,
         writeCh: make(chan func() error, 100),
+        readPool: &sync.Pool{
+            New: func() interface{} {
+                conn, err := sql.Open("sqlite3", "./liveops.db")
+                if err != nil {
+                    log.Fatalf("failed to open read pool conn: %v", err)
+                }
+                conn.SetMaxOpenConns(1) // Each pooled conn is single-use
+                return conn
+            },
+        },
     }
     go repo.processWrites()
     _, err := db.Exec(`
@@ -53,8 +65,11 @@ func (r *EventRepository) processWrites() {
 }
 
 func (r *EventRepository) GetActiveEvents() ([]Event, error) {
+    conn := r.readPool.Get().(*sql.DB)
+    defer r.readPool.Put(conn)
+
     now := time.Now().Unix()
-    rows, err := r.db.Query(`
+    rows, err := conn.Query(`
         SELECT id, title, description, start_time, end_time, rewards 
         FROM events 
         WHERE start_time <= ? AND end_time >= ?`,
@@ -79,9 +94,12 @@ func (r *EventRepository) GetActiveEvents() ([]Event, error) {
 }
 
 func (r *EventRepository) GetEvent(id string) (Event, error) {
+    conn := r.readPool.Get().(*sql.DB)
+    defer r.readPool.Put(conn)
+
     var e Event
     var startTime, endTime int64
-    err := r.db.QueryRow(`
+    err := conn.QueryRow(`
         SELECT id, title, description, start_time, end_time, rewards 
         FROM events WHERE id = ?`, id).
         Scan(&e.ID, &e.Title, &e.Description, &startTime, &e.EndTime, &e.Rewards)
@@ -106,4 +124,52 @@ func (r *EventRepository) CreateEvent(e Event) error {
     return <-done
 }
 
-// Update other write methods (UpdateEvent, DeleteEvent) similarly
+func (r *EventRepository) UpdateEvent(e Event) error {
+    done := make(chan error, 1)
+    r.writeCh <- func() error {
+        _, err := r.db.Exec(`
+            UPDATE events 
+            SET title = ?, description = ?, start_time = ?, end_time = ?, rewards = ?
+            WHERE id = ?`,
+            e.Title, e.Description, e.StartTime.AsTime().Unix(), e.EndTime.AsTime().Unix(), e.Rewards, e.ID)
+        done <- err
+        return err
+    }
+    return <-done
+}
+
+func (r *EventRepository) DeleteEvent(id string) error {
+    done := make(chan error, 1)
+    r.writeCh <- func() error {
+        _, err := r.db.Exec(`DELETE FROM events WHERE id = ?`, id)
+        done <- err
+        return err
+    }
+    return <-done
+}
+
+func (r *EventRepository) ListEvents() ([]Event, error) {
+    conn := r.readPool.Get().(*sql.DB)
+    defer r.readPool.Put(conn)
+
+    rows, err := conn.Query(`
+        SELECT id, title, description, start_time, end_time, rewards 
+        FROM events`)
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+
+    var events []Event
+    for rows.Next() {
+        var e Event
+        var startTime, endTime int64
+        if err := rows.Scan(&e.ID, &e.Title, &e.Description, &startTime, &e.EndTime, &e.Rewards); err != nil {
+            return nil, err
+        }
+        e.StartTime = timestamppb.New(time.Unix(startTime, 0))
+        e.EndTime = timestamppb.New(time.Unix(endTime, 0))
+        events = append(events, e)
+    }
+    return events, nil
+}
