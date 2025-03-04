@@ -14,6 +14,7 @@ import (
     "github.com/go-chi/chi/v5"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/mock"
+    "go.uber.org/zap"
     "google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -57,7 +58,9 @@ func (m *MockEventRepository) ListEvents() ([]db.Event, error) {
 
 func TestService(t *testing.T) {
     mockRepo := new(MockEventRepository)
-    svc := NewService(mockRepo)
+    // Use a no-op logger for tests to avoid cluttering output
+    logger := zap.NewNop()
+    svc := NewService(mockRepo, logger)
 
     sampleEvent := db.Event{
         ID:          "evt1",
@@ -94,7 +97,7 @@ func TestService(t *testing.T) {
         svc.GetActiveEvents(rr, req)
 
         assert.Equal(t, http.StatusInternalServerError, rr.Code)
-        
+
         var response map[string]string
         err := json.Unmarshal(rr.Body.Bytes(), &response)
         assert.NoError(t, err)
@@ -113,7 +116,7 @@ func TestService(t *testing.T) {
         svc.GetEvent(rr, req)
 
         assert.Equal(t, http.StatusOK, rr.Code)
-        
+
         var event db.Event
         err := json.Unmarshal(rr.Body.Bytes(), &event)
         assert.NoError(t, err)
@@ -132,7 +135,7 @@ func TestService(t *testing.T) {
         svc.GetEvent(rr, req)
 
         assert.Equal(t, http.StatusNotFound, rr.Code)
-        
+
         var response map[string]string
         err := json.Unmarshal(rr.Body.Bytes(), &response)
         assert.NoError(t, err)
@@ -148,7 +151,7 @@ func TestService(t *testing.T) {
         svc.GetEvent(rr, req)
 
         assert.Equal(t, http.StatusBadRequest, rr.Code)
-        
+
         var response map[string]string
         err := json.Unmarshal(rr.Body.Bytes(), &response)
         assert.NoError(t, err)

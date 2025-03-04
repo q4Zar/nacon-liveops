@@ -7,13 +7,13 @@ import (
     "liveops/internal/auth"
     "liveops/internal/db"
     "liveops/internal/event"
-    "log"
     "net"
     "net/http"
     "time"
 
     "github.com/go-chi/chi/v5"
     "github.com/sony/gobreaker"
+    "go.uber.org/zap"
     "golang.org/x/time/rate"
     "google.golang.org/grpc"
     _ "github.com/mattn/go-sqlite3"
@@ -26,19 +26,19 @@ type Server struct {
     breaker    *gobreaker.CircuitBreaker
 }
 
-func NewServer() *Server {
+func NewServer(logger *zap.Logger) *Server {
     dbConn, err := sql.Open("sqlite3", "./liveops.db")
     if err != nil {
-        log.Fatal(err)
+        logger.Fatal("failed to open database", zap.Error(err))
     }
     dbConn.SetMaxOpenConns(20)
     dbConn.SetMaxIdleConns(10)
 
     eventRepo := db.NewEventRepository(dbConn)
-    eventSvc := event.NewService(eventRepo)
+    eventSvc := event.NewService(eventRepo, logger)
 
     grpcServer := grpc.NewServer(
-        grpc.UnaryInterceptor(auth.GRPCAuthInterceptor),
+        grpc.UnaryInterceptor(auth.GRPCAuthInterceptor(logger)),
         grpc.MaxConcurrentStreams(100),
     )
     api.RegisterLiveOpsServiceServer(grpcServer, eventSvc)
@@ -56,8 +56,8 @@ func NewServer() *Server {
     r := chi.NewRouter()
     r.Use(RateLimit(100, 10))
     r.Use(TimeoutMiddleware(5 * time.Second))
-    r.With(auth.HTTPAuthMiddleware("http_user")).Get("/events", breakerWrapper(breaker, eventSvc.GetActiveEvents))
-    r.With(auth.HTTPAuthMiddleware("http_user")).Get("/events/{id}", breakerWrapper(breaker, eventSvc.GetEvent))
+    r.With(auth.HTTPAuthMiddleware("http_user", logger)).Get("/events", breakerWrapper(breaker, eventSvc.GetActiveEvents))
+    r.With(auth.HTTPAuthMiddleware("http_user", logger)).Get("/events/{id}", breakerWrapper(breaker, eventSvc.GetEvent))
     r.Handle("/", grpcServer)
 
     return &Server{

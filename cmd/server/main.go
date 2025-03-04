@@ -2,18 +2,38 @@ package main
 
 import (
     "liveops/internal/server"
-    "log"
     "net"
+
+    "go.uber.org/zap"
 )
 
 func main() {
-    listener, err := net.Listen("tcp", ":8080")
+    logger, err := zap.NewProduction()
     if err != nil {
-        log.Fatalf("failed to listen: %v", err)
+        panic("failed to initialize logger: " + err.Error())
+    }
+    defer logger.Sync()
+
+    host := "localhost"
+    port := "8080"
+    url := "http://" + host + ":" + port
+    listener, err := net.Listen("tcp", ":"+port)
+    if err != nil {
+        logger.Fatal("Failed to start listener",
+            zap.String("host", host),
+            zap.String("port", port),
+            zap.Error(err))
     }
 
-    srv := server.NewServer()
+    logger.Info("Application started",
+        zap.String("host", host),
+        zap.String("url", url))
+
+    srv := server.NewServer(logger)
     if err := srv.Serve(listener); err != nil {
-        log.Fatalf("server failed: %v", err)
+        logger.Fatal("Server failed",
+            zap.String("host", host),
+            zap.String("url", url),
+            zap.Error(err))
     }
 }
