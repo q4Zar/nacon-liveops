@@ -1,0 +1,12 @@
+services:
+  go-nacon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/go/src/github.com/nacon
+    environment:
+      - GO111MODULE=on
+      - GOPROXY=https://goproxy.io

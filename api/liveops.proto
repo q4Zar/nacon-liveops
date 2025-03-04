@@ -1,0 +1,38 @@
+syntax = "proto3";
+package liveops;
+option go_package = "./api";
+
+service LiveOpsService {
+  rpc CreateEvent (EventRequest) returns (EventResponse);
+  rpc UpdateEvent (EventRequest) returns (EventResponse);
+  rpc DeleteEvent (DeleteRequest) returns (Empty);
+  rpc ListEvents (Empty) returns (EventsResponse);
+}
+
+message EventRequest {
+  string id = 1;
+  string title = 2;
+  string description = 3;
+  int64 start_time = 4;
+  int64 end_time = 5;
+  string rewards = 6;
+}
+
+message EventResponse {
+  string id = 1;
+  string title = 2;
+  string description = 3;
+  int64 start_time = 4;
+  int64 end_time = 5;
+  string rewards = 6;
+}
+
+message DeleteRequest {
+  string id = 1;
+}
+
+message EventsResponse {
+  repeated EventResponse events = 1;
+}
+
+message Empty {}
