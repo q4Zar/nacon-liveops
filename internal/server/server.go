@@ -31,7 +31,7 @@ func NewServer() *Server {
     if err != nil {
         log.Fatal(err)
     }
-    dbConn.SetMaxOpenConns(20) // Increased for concurrent reads
+    dbConn.SetMaxOpenConns(20)
     dbConn.SetMaxIdleConns(10)
 
     eventRepo := db.NewEventRepository(dbConn)
@@ -43,7 +43,6 @@ func NewServer() *Server {
     )
     api.RegisterLiveOpsServiceServer(grpcServer, eventSvc)
 
-    // Circuit breaker for HTTP requests
     breaker := gobreaker.NewCircuitBreaker(gobreaker.Settings{
         Name:        "http-breaker",
         MaxRequests: 5,
@@ -56,7 +55,7 @@ func NewServer() *Server {
 
     r := chi.NewRouter()
     r.Use(RateLimit(100, 10))
-    r.Use(TimeoutMiddleware(5 * time.Second)) // 5-second timeout
+    r.Use(TimeoutMiddleware(5 * time.Second))
     r.With(auth.HTTPAuthMiddleware("http_user")).Get("/events", breakerWrapper(breaker, eventSvc.GetActiveEvents))
     r.With(auth.HTTPAuthMiddleware("http_user")).Get("/events/{id}", breakerWrapper(breaker, eventSvc.GetEvent))
     r.Handle("/", grpcServer)

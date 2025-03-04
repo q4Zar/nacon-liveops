@@ -18,14 +18,24 @@ type Event struct {
     Rewards     string
 }
 
-type EventRepository struct {
-    db      *sql.DB
-    writeCh chan func() error
-    readPool *sync.Pool // Pool for read-only connections
+// EventRepository defines the interface for event storage operations
+type EventRepository interface {
+    GetActiveEvents() ([]Event, error)
+    GetEvent(id string) (Event, error)
+    CreateEvent(e Event) error
+    UpdateEvent(e Event) error
+    DeleteEvent(id string) error
+    ListEvents() ([]Event, error)
 }
 
-func NewEventRepository(db *sql.DB) *EventRepository {
-    repo := &EventRepository{
+type eventRepository struct {
+    db       *sql.DB
+    writeCh  chan func() error
+    readPool *sync.Pool
+}
+
+func NewEventRepository(db *sql.DB) EventRepository {
+    repo := &eventRepository{
         db:      db,
         writeCh: make(chan func() error, 100),
         readPool: &sync.Pool{
@@ -34,7 +44,7 @@ func NewEventRepository(db *sql.DB) *EventRepository {
                 if err != nil {
                     log.Fatalf("failed to open read pool conn: %v", err)
                 }
-                conn.SetMaxOpenConns(1) // Each pooled conn is single-use
+                conn.SetMaxOpenConns(1)
                 return conn
             },
         },
@@ -56,7 +66,7 @@ func NewEventRepository(db *sql.DB) *EventRepository {
     return repo
 }
 
-func (r *EventRepository) processWrites() {
+func (r *eventRepository) processWrites() {
     for fn := range r.writeCh {
         if err := fn(); err != nil {
             log.Printf("write error: %v", err)
@@ -64,7 +74,7 @@ func (r *EventRepository) processWrites() {
     }
 }
 
-func (r *EventRepository) GetActiveEvents() ([]Event, error) {
+func (r *eventRepository) GetActiveEvents() ([]Event, error) {
     conn := r.readPool.Get().(*sql.DB)
     defer r.readPool.Put(conn)
 
@@ -93,7 +103,7 @@ func (r *EventRepository) GetActiveEvents() ([]Event, error) {
     return events, nil
 }
 
-func (r *EventRepository) GetEvent(id string) (Event, error) {
+func (r *eventRepository) GetEvent(id string) (Event, error) {
     conn := r.readPool.Get().(*sql.DB)
     defer r.readPool.Put(conn)
 
@@ -111,7 +121,7 @@ func (r *EventRepository) GetEvent(id string) (Event, error) {
     return e, nil
 }
 
-func (r *EventRepository) CreateEvent(e Event) error {
+func (r *eventRepository) CreateEvent(e Event) error {
     done := make(chan error, 1)
     r.writeCh <- func() error {
         _, err := r.db.Exec(`
@@ -124,7 +134,7 @@ func (r *EventRepository) CreateEvent(e Event) error {
     return <-done
 }
 
-func (r *EventRepository) UpdateEvent(e Event) error {
+func (r *eventRepository) UpdateEvent(e Event) error {
     done := make(chan error, 1)
     r.writeCh <- func() error {
         _, err := r.db.Exec(`
@@ -138,7 +148,7 @@ func (r *EventRepository) UpdateEvent(e Event) error {
     return <-done
 }
 
-func (r *EventRepository) DeleteEvent(id string) error {
+func (r *eventRepository) DeleteEvent(id string) error {
     done := make(chan error, 1)
     r.writeCh <- func() error {
         _, err := r.db.Exec(`DELETE FROM events WHERE id = ?`, id)
@@ -148,7 +158,7 @@ func (r *EventRepository) DeleteEvent(id string) error {
     return <-done
 }
 
-func (r *EventRepository) ListEvents() ([]Event, error) {
+func (r *eventRepository) ListEvents() ([]Event, error) {
     conn := r.readPool.Get().(*sql.DB)
     defer r.readPool.Put(conn)
 

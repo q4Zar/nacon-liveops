@@ -15,11 +15,11 @@ import (
 )
 
 type Service struct {
-    api.UnimplementedLiveOpsServiceServer // Embed this to satisfy the interface
-    repo *db.EventRepository
+    api.UnimplementedLiveOpsServiceServer
+    repo db.EventRepository
 }
 
-func NewService(repo *db.EventRepository) *Service {
+func NewService(repo db.EventRepository) *Service {
     return &Service{
         repo: repo,
     }
