@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"math/rand"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,21 +23,35 @@ import (
 )
 
 const (
-    grpcAddr         = "localhost:8080"
-    httpAddr         = "http://localhost:8080"
-    duration         = 60 * time.Second // 1 minute stress test
-    grpcConcurrency  = 10              // Keep high for gRPC
-    httpConcurrency  = 2               // Reduce for HTTP to hit rate limit moderately
-    grpcAuthKey      = "admin-key-456" // For gRPC
-    httpAuthKey      = "public-key-123" // For HTTP
-    requestDelay     = 5 * time.Millisecond // Slight delay to avoid resource exhaustion
+    duration        = 60 * time.Second     // 1 minute stress test
+    grpcConcurrency = 10                   // Keep high for gRPC
+    httpConcurrency = 2                    // Reduce for HTTP to hit rate limit moderately
+    grpcAuthKey     = "admin-key-456"      // For gRPC
+    httpAuthKey     = "public-key-123"     // For HTTP
+    requestDelay    = 5 * time.Millisecond // Slight delay to avoid resource exhaustion
 )
 
 var (
     eventIDs      []string      // Store created event IDs
     eventIDsMutex sync.Mutex    // Protect access to eventIDs
     httpClient    = &http.Client{Timeout: 5 * time.Second}
+    httpAddr      = getServerURL()      // HTTP server URL
+    grpcAddr      = getGRPCServerURL()  // gRPC server URL
 )
+
+func getServerURL() string {
+    if url := os.Getenv("SERVER_URL"); url != "" {
+        return url
+    }
+    return "http://localhost:8080" // Default if not set
+}
+
+func getGRPCServerURL() string {
+    if url := os.Getenv("GRPC_SERVER_URL"); url != "" {
+        return url
+    }
+    return "localhost:8080" // Default if not set
+}
 
 type opStats struct {
     Success     uint64
@@ -287,7 +302,7 @@ func main() {
     }
 
     var wg sync.WaitGroup
-    log.Printf("Starting continuous stress test for %v with %d gRPC workers and %d HTTP workers per operation", duration, grpcConcurrency, httpConcurrency)
+    log.Printf("Starting continuous stress test for %v with %d gRPC workers and %d HTTP workers per operation, targeting HTTP: %s, gRPC: %s", duration, grpcConcurrency, httpConcurrency, httpAddr, grpcAddr)
 
     // Start workers for each operation
     for i := range operations {

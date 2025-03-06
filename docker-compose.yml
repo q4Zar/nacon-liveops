@@ -1,8 +1,10 @@
+# version: "3.8"
 services:
   go-nacon:
     build:
       context: .
       dockerfile: Dockerfile
+      target: server
     ports:
       - "8080:8080"
     volumes:
@@ -10,3 +12,27 @@ services:
     environment:
       - GO111MODULE=on
       - GOPROXY=https://goproxy.io
+  stressclient:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: stressclient
+    depends_on:
+      - go-nacon
+    environment:
+      - GO111MODULE=on
+      - GOPROXY=https://goproxy.io
+      - SERVER_URL=http://go-nacon:8080
+      - GRPC_SERVER_URL=go-nacon:8080
+  cli:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: cli
+    depends_on:
+      - go-nacon
+    environment:
+      - SERVER_URL=http://go-nacon:8080
+      - GRPC_SERVER_URL=go-nacon:8080
+    tty: true  # Allocate a pseudo-TTY
+    stdin_open: true  # Keep stdin open for input
