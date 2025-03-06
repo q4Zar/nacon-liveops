@@ -1,12 +1,12 @@
 package db
 
 import (
-    "database/sql"
-    "log"
-    "sync"
-    "time"
+	"database/sql"
+	"log"
+	"sync"
+	"time"
 
-    "google.golang.org/protobuf/types/known/timestamppb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Event struct {
@@ -18,7 +18,6 @@ type Event struct {
     Rewards     string
 }
 
-// EventRepository defines the interface for event storage operations
 type EventRepository interface {
     GetActiveEvents() ([]Event, error)
     GetEvent(id string) (Event, error)
@@ -92,8 +91,8 @@ func (r *eventRepository) GetActiveEvents() ([]Event, error) {
     var events []Event
     for rows.Next() {
         var e Event
-        var startTime, endTime int64
-        if err := rows.Scan(&e.ID, &e.Title, &e.Description, &startTime, &e.EndTime, &e.Rewards); err != nil {
+        var startTime, endTime int64 // Temporary int64 variables
+        if err := rows.Scan(&e.ID, &e.Title, &e.Description, &startTime, &endTime, &e.Rewards); err != nil {
             return nil, err
         }
         e.StartTime = timestamppb.New(time.Unix(startTime, 0))
@@ -108,11 +107,11 @@ func (r *eventRepository) GetEvent(id string) (Event, error) {
     defer r.readPool.Put(conn)
 
     var e Event
-    var startTime, endTime int64
+    var startTime, endTime int64 // Temporary int64 variables
     err := conn.QueryRow(`
         SELECT id, title, description, start_time, end_time, rewards 
         FROM events WHERE id = ?`, id).
-        Scan(&e.ID, &e.Title, &e.Description, &startTime, &e.EndTime, &e.Rewards)
+        Scan(&e.ID, &e.Title, &e.Description, &startTime, &endTime, &e.Rewards)
     if err != nil {
         return Event{}, err
     }
@@ -173,8 +172,8 @@ func (r *eventRepository) ListEvents() ([]Event, error) {
     var events []Event
     for rows.Next() {
         var e Event
-        var startTime, endTime int64
-        if err := rows.Scan(&e.ID, &e.Title, &e.Description, &startTime, &e.EndTime, &e.Rewards); err != nil {
+        var startTime, endTime int64 // Temporary int64 variables
+        if err := rows.Scan(&e.ID, &e.Title, &e.Description, &startTime, &endTime, &e.Rewards); err != nil {
             return nil, err
         }
         e.StartTime = timestamppb.New(time.Unix(startTime, 0))

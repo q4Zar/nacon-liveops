@@ -1,22 +1,25 @@
 package server
 
 import (
-    "context"
-    "database/sql"
-    "liveops/api"
-    "liveops/internal/auth"
-    "liveops/internal/db"
-    "liveops/internal/event"
-    "net"
-    "net/http"
-    "time"
+	"context"
+	"database/sql"
+	"liveops/api"
+	"liveops/internal/auth"
+	"liveops/internal/db"
+	"liveops/internal/event"
+	"net"
+	"net/http"
+	"time"
 
-    "github.com/go-chi/chi/v5"
-    "github.com/sony/gobreaker"
-    "go.uber.org/zap"
-    "golang.org/x/time/rate"
-    "google.golang.org/grpc"
-    _ "github.com/mattn/go-sqlite3"
+	"github.com/go-chi/chi/v5"
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/sony/gobreaker"
+	"go.uber.org/zap"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+	"golang.org/x/time/rate"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
 type Server struct {
@@ -42,6 +45,7 @@ func NewServer(logger *zap.Logger) *Server {
         grpc.MaxConcurrentStreams(100),
     )
     api.RegisterLiveOpsServiceServer(grpcServer, eventSvc)
+    reflection.Register(grpcServer) // Enable reflection for grpcurl
 
     breaker := gobreaker.NewCircuitBreaker(gobreaker.Settings{
         Name:        "http-breaker",
@@ -53,16 +57,28 @@ func NewServer(logger *zap.Logger) *Server {
         },
     })
 
-    r := chi.NewRouter()
-    r.Use(RateLimit(100, 10))
-    r.Use(TimeoutMiddleware(5 * time.Second))
-    r.With(auth.HTTPAuthMiddleware("http_user", logger)).Get("/events", breakerWrapper(breaker, eventSvc.GetActiveEvents))
-    r.With(auth.HTTPAuthMiddleware("http_user", logger)).Get("/events/{id}", breakerWrapper(breaker, eventSvc.GetEvent))
-    r.Handle("/", grpcServer)
+    httpRouter := chi.NewRouter() // Renamed for clarity
+    httpRouter.Use(RateLimit(100, 10))
+    httpRouter.Use(TimeoutMiddleware(5 * time.Second))
+    httpRouter.With(auth.HTTPAuthMiddleware("http_user", logger)).Get("/events", breakerWrapper(breaker, eventSvc.GetActiveEvents))
+    httpRouter.With(auth.HTTPAuthMiddleware("http_user", logger)).Get("/events/{id}", breakerWrapper(breaker, eventSvc.GetEvent))
+
+    // Single handler to multiplex HTTP and gRPC
+    handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.ProtoMajor == 2 && r.Header.Get("Content-Type") == "application/grpc" {
+            grpcServer.ServeHTTP(w, r)
+        } else {
+            httpRouter.ServeHTTP(w, r) // Use the Chi router for HTTP
+        }
+    })
+
+    // Wrap with h2c to support HTTP/2 cleartext
+    h2s := &http2.Server{}
+    h2cHandler := h2c.NewHandler(handler, h2s)
 
     return &Server{
         httpServer: &http.Server{
-            Handler:      h2cHandler(r, grpcServer),
+            Handler:      h2cHandler,
             ReadTimeout:  10 * time.Second,
             WriteTimeout: 10 * time.Second,
         },
@@ -74,16 +90,6 @@ func NewServer(logger *zap.Logger) *Server {
 
 func (s *Server) Serve(l net.Listener) error {
     return s.httpServer.Serve(l)
-}
-
-func h2cHandler(httpHandler http.Handler, grpcServer *grpc.Server) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        if r.ProtoMajor == 2 && r.Header.Get("Content-Type") == "application/grpc" {
-            grpcServer.ServeHTTP(w, r)
-        } else {
-            httpHandler.ServeHTTP(w, r)
-        }
-    })
 }
 
 func RateLimit(limit float64, burst int) func(next http.Handler) http.Handler {
