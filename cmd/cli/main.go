@@ -265,6 +265,8 @@ func runInteractive() {
         log.Fatalf("Authentication failed: %v", err)
     }
 
+    fmt.Printf("Authenticated as %s (type: %s)\n", credentials.Username, credentials.UserType)
+
     // Connect to gRPC server
     conn, err := grpc.Dial(
         grpcServerURL,
@@ -276,8 +278,10 @@ func runInteractive() {
     defer conn.Close()
     grpcClient := api.NewLiveOpsServiceClient(conn)
 
-    // Context with auth
-    ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Basic "+credentials.Token)
+    // Context with auth - add "Basic " prefix
+    authToken := "Basic " + credentials.Token
+    fmt.Printf("Using authorization token: %s\n", authToken)
+    ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", authToken)
 
     // Main interaction loop
     for {

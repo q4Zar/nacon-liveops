@@ -99,33 +99,45 @@ func (a *Authenticator) authenticateHTTP(r *http.Request) (*db.User, error) {
 func (a *Authenticator) authenticateGRPC(ctx context.Context) (*db.User, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
+		a.logger.Debug("no metadata in context")
 		return nil, status.Error(codes.Unauthenticated, "no metadata provided")
 	}
 
 	auth := md.Get("authorization")
 	if len(auth) == 0 {
+		a.logger.Debug("no authorization header")
 		return nil, status.Error(codes.Unauthenticated, "no credentials provided")
 	}
 
+	a.logger.Debug("received auth header", zap.String("auth", auth[0]))
+
 	const prefix = "Basic "
 	if !strings.HasPrefix(auth[0], prefix) {
+		a.logger.Debug("invalid auth type", zap.String("auth", auth[0]))
 		return nil, status.Error(codes.Unauthenticated, "invalid auth type")
 	}
 
 	payload, err := base64.StdEncoding.DecodeString(auth[0][len(prefix):])
 	if err != nil {
+		a.logger.Debug("invalid base64", zap.Error(err))
 		return nil, status.Error(codes.Unauthenticated, "invalid base64 in credentials")
 	}
 
 	pair := strings.SplitN(string(payload), ":", 2)
 	if len(pair) != 2 {
+		a.logger.Debug("invalid credential format")
 		return nil, status.Error(codes.Unauthenticated, "invalid credentials format")
 	}
 
+	a.logger.Debug("attempting to validate user", zap.String("username", pair[0]))
 	user, err := a.userRepo.ValidateUser(pair[0], pair[1])
 	if err != nil {
+		a.logger.Debug("user validation failed", zap.Error(err))
 		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}
 
+	a.logger.Debug("user authenticated successfully", 
+		zap.String("username", user.Username),
+		zap.String("type", string(user.Type)))
 	return user, nil
 } 
