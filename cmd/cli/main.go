@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"liveops/api"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -29,10 +31,17 @@ const (
     httpAuthKey          = "public-key-123"       // HTTP auth
 )
 
+type Credentials struct {
+    Username string    `json:"username"`
+    UserType db.UserType `json:"user_type"`
+    Token    string    `json:"token"` // base64 encoded username:password
+}
+
 var (
     serverURL     = getEnv("SERVER_URL", defaultServerURL)
     grpcServerURL = getEnv("GRPC_SERVER_URL", defaultGRPCServerURL)
     httpClient    = &http.Client{Timeout: 5 * time.Second}
+    credentials   *Credentials
 )
 
 // getEnv retrieves an environment variable or returns a default value
@@ -118,8 +127,144 @@ func main() {
     }
 }
 
+// getCredentialsPath returns the path to the credentials file
+func getCredentialsPath() string {
+    homeDir, err := os.UserHomeDir()
+    if err != nil {
+        log.Fatal("Could not determine home directory")
+    }
+    return filepath.Join(homeDir, ".liveops-credentials")
+}
+
+// loadCredentials loads stored credentials if they exist
+func loadCredentials() *Credentials {
+    path := getCredentialsPath()
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return nil
+    }
+
+    var creds Credentials
+    if err := json.Unmarshal(data, &creds); err != nil {
+        return nil
+    }
+    return &creds
+}
+
+// saveCredentials saves credentials to disk
+func saveCredentials(creds *Credentials) error {
+    data, err := json.Marshal(creds)
+    if err != nil {
+        return err
+    }
+    return os.WriteFile(getCredentialsPath(), data, 0600)
+}
+
+// authenticate handles user authentication
+func authenticate() error {
+    // Check if we already have credentials
+    if creds := loadCredentials(); creds != nil {
+        credentials = creds
+        return nil
+    }
+
+    // Ask whether to sign up or sign in
+    var action string
+    prompt := &survey.Select{
+        Message: "Choose action:",
+        Options: []string{"sign-in", "sign-up", "exit"},
+    }
+    survey.AskOne(prompt, &action)
+
+    switch action {
+    case "sign-up":
+        return signUp()
+    case "sign-in":
+        return signIn()
+    default:
+        os.Exit(0)
+        return nil
+    }
+}
+
+func signUp() error {
+    var username, password string
+    survey.AskOne(&survey.Input{
+        Message: "Enter username:",
+    }, &username)
+
+    survey.AskOne(&survey.Password{
+        Message: "Enter password:",
+    }, &password)
+
+    typePrompt := &survey.Select{
+        Message: "Select user type:",
+        Options: []string{"http", "admin"},
+    }
+    var userType string
+    survey.AskOne(typePrompt, &userType)
+
+    // Create the user
+    database, err := db.NewDB("./liveops.db")
+    if err != nil {
+        return fmt.Errorf("failed to initialize database: %v", err)
+    }
+
+    userRepo := db.NewUserRepository(database.DB)
+    err = userRepo.CreateUser(username, password, db.UserType(userType))
+    if err != nil {
+        return fmt.Errorf("failed to create user: %v", err)
+    }
+
+    // Store credentials
+    token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+    credentials = &Credentials{
+        Username: username,
+        UserType: db.UserType(userType),
+        Token:    token,
+    }
+    return saveCredentials(credentials)
+}
+
+func signIn() error {
+    var username, password string
+    survey.AskOne(&survey.Input{
+        Message: "Enter username:",
+    }, &username)
+
+    survey.AskOne(&survey.Password{
+        Message: "Enter password:",
+    }, &password)
+
+    // Validate credentials
+    database, err := db.NewDB("./liveops.db")
+    if err != nil {
+        return fmt.Errorf("failed to initialize database: %v", err)
+    }
+
+    userRepo := db.NewUserRepository(database.DB)
+    user, err := userRepo.ValidateUser(username, password)
+    if err != nil {
+        return fmt.Errorf("invalid credentials: %v", err)
+    }
+
+    // Store credentials
+    token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+    credentials = &Credentials{
+        Username: username,
+        UserType: user.Type,
+        Token:    token,
+    }
+    return saveCredentials(credentials)
+}
+
 // runInteractive handles the interactive CLI flow
 func runInteractive() {
+    // First authenticate
+    if err := authenticate(); err != nil {
+        log.Fatalf("Authentication failed: %v", err)
+    }
+
     // Connect to gRPC server
     conn, err := grpc.Dial(
         grpcServerURL,
@@ -132,7 +277,7 @@ func runInteractive() {
     grpcClient := api.NewLiveOpsServiceClient(conn)
 
     // Context with auth
-    ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", grpcAuthKey)
+    ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Basic "+credentials.Token)
 
     // Main interaction loop
     for {
@@ -140,6 +285,13 @@ func runInteractive() {
         if action == "exit" {
             fmt.Println("Exiting...")
             return
+        }
+
+        // Check user permissions
+        if credentials.UserType == db.UserTypeHTTP && 
+           (action == "create" || action == "update" || action == "delete" || action == "list") {
+            fmt.Println("Error: HTTP users cannot use gRPC endpoints")
+            continue
         }
 
         switch action {
@@ -261,7 +413,7 @@ func fetchActiveEvents() {
         log.Printf("Failed to create request: %v", err)
         return
     }
-    req.Header.Set("Authorization", httpAuthKey)
+    req.Header.Set("Authorization", "Basic "+credentials.Token)
 
     resp, err := httpClient.Do(req)
     if err != nil {
@@ -295,7 +447,7 @@ func fetchEventByID() {
         log.Printf("Failed to create request: %v", err)
         return
     }
-    req.Header.Set("Authorization", httpAuthKey)
+    req.Header.Set("Authorization", "Basic "+credentials.Token)
 
     resp, err := httpClient.Do(req)
     if err != nil {
