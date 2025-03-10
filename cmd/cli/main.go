@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"liveops/api" // Your proto-generated package
+	"liveops/api"
 	"liveops/internal/db"
 	"log"
 	"net/http"
@@ -20,8 +20,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
 const (
@@ -414,10 +412,9 @@ func createUserInteractive() {
     }
     survey.AskOne(prompt, &username)
 
-    prompt = &survey.Password{
+    survey.AskOne(&survey.Password{
         Message: "Enter password:",
-    }
-    survey.AskOne(prompt, &password)
+    }, &password)
 
     typePrompt := &survey.Select{
         Message: "Select user type:",
