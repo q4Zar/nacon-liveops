@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"liveops/api" // Your proto-generated package
+	"liveops/internal/db"
 	"log"
 	"net/http"
 	"os"
@@ -19,6 +20,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 const (
@@ -58,8 +61,57 @@ var interactCmd = &cobra.Command{
     },
 }
 
+// userCmd represents the user management command
+var userCmd = &cobra.Command{
+    Use:   "user",
+    Short: "User management commands",
+    Long:  `Commands for managing users in the system.`,
+}
+
+// createUserCmd creates a new user
+var createUserCmd = &cobra.Command{
+    Use:   "create",
+    Short: "Create a new user",
+    Run: func(cmd *cobra.Command, args []string) {
+        username, _ := cmd.Flags().GetString("username")
+        password, _ := cmd.Flags().GetString("password")
+        userType, _ := cmd.Flags().GetString("type")
+
+        if username == "" || password == "" {
+            log.Fatal("Username and password are required")
+        }
+
+        // Validate user type
+        uType := db.UserType(userType)
+        if uType != db.UserTypeHTTP && uType != db.UserTypeAdmin {
+            log.Fatal("Invalid user type. Must be 'http' or 'admin'")
+        }
+
+        // Open database connection
+        gormDB, err := gorm.Open(sqlite.Open("./liveops.db"), &gorm.Config{})
+        if err != nil {
+            log.Fatalf("Failed to connect database: %v", err)
+        }
+
+        userRepo := db.NewUserRepository(gormDB)
+        err = userRepo.CreateUser(username, password, uType)
+        if err != nil {
+            log.Fatalf("Failed to create user: %v", err)
+        }
+
+        fmt.Printf("User %s created successfully with type %s\n", username, userType)
+    },
+}
+
 func init() {
     rootCmd.AddCommand(interactCmd)
+    rootCmd.AddCommand(userCmd)
+
+    // User management command flags
+    createUserCmd.Flags().String("username", "", "Username for the new user")
+    createUserCmd.Flags().String("password", "", "Password for the new user")
+    createUserCmd.Flags().String("type", "http", "User type (http or admin)")
+    userCmd.AddCommand(createUserCmd)
 }
 
 func main() {
@@ -105,6 +157,8 @@ func runInteractive() {
             fetchActiveEvents()
         case "fetch-by-id":
             fetchEventByID()
+        case "create-user":
+            createUserInteractive()
         }
     }
 }
@@ -118,6 +172,7 @@ func selectAction() string {
         "list (gRPC: ListEvents)",
         "fetch-active (HTTP: GET /events)",
         "fetch-by-id (HTTP: GET /events/{id})",
+        "create-user (Create new user)",
         "exit",
     }
     prompt := &survey.Select{
@@ -350,4 +405,40 @@ func printResponse(method string, resp interface{}) {
         return
     }
     fmt.Printf("%s Response:\n%s\n\n", method, string(data))
+}
+
+func createUserInteractive() {
+    var username, password string
+    prompt := &survey.Input{
+        Message: "Enter username:",
+    }
+    survey.AskOne(prompt, &username)
+
+    prompt = &survey.Password{
+        Message: "Enter password:",
+    }
+    survey.AskOne(prompt, &password)
+
+    typePrompt := &survey.Select{
+        Message: "Select user type:",
+        Options: []string{"http", "admin"},
+    }
+    var userType string
+    survey.AskOne(typePrompt, &userType)
+
+    // Open database connection
+    gormDB, err := gorm.Open(sqlite.Open("./liveops.db"), &gorm.Config{})
+    if err != nil {
+        log.Printf("Failed to connect database: %v", err)
+        return
+    }
+
+    userRepo := db.NewUserRepository(gormDB)
+    err = userRepo.CreateUser(username, password, db.UserType(userType))
+    if err != nil {
+        log.Printf("Failed to create user: %v", err)
+        return
+    }
+
+    fmt.Printf("User %s created successfully with type %s\n", username, userType)
 }

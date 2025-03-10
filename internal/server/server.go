@@ -26,18 +26,31 @@ type Server struct {
     grpcServer *grpc.Server
     eventSvc   *event.Service
     breaker    *gobreaker.CircuitBreaker
+    db         *db.DB
 }
 
 func NewServer(logger *zap.Logger) *Server {
-    eventRepo := db.NewEventRepository("./liveops.db")
-    eventSvc := event.NewService(eventRepo, logger)
+    // Initialize database
+    database, err := db.NewDB("./liveops.db")
+    if err != nil {
+        logger.Fatal("failed to initialize database", zap.Error(err))
+    }
 
+    // Initialize repositories
+    eventRepo := db.NewEventRepository(database.DB)
+    userRepo := db.NewUserRepository(database.DB)
+
+    // Initialize services
+    eventSvc := event.NewService(eventRepo, logger)
+    authenticator := auth.NewAuthenticator(userRepo, logger)
+
+    // Initialize gRPC server with auth interceptor
     grpcServer := grpc.NewServer(
-        grpc.UnaryInterceptor(auth.GRPCAuthInterceptor(logger)),
+        grpc.UnaryInterceptor(authenticator.GRPCAuthInterceptor),
         grpc.MaxConcurrentStreams(100),
     )
     api.RegisterLiveOpsServiceServer(grpcServer, eventSvc)
-    reflection.Register(grpcServer) // Enable reflection for grpcurl
+    reflection.Register(grpcServer)
 
     breaker := gobreaker.NewCircuitBreaker(gobreaker.Settings{
         Name:        "http-breaker",
@@ -52,8 +65,13 @@ func NewServer(logger *zap.Logger) *Server {
     httpRouter := chi.NewRouter()
     httpRouter.Use(RateLimit(100, 10))
     httpRouter.Use(TimeoutMiddleware(5 * time.Second))
-    httpRouter.With(auth.HTTPAuthMiddleware("http_user", logger)).Get("/events", breakerWrapper(breaker, eventSvc.GetActiveEvents))
-    httpRouter.With(auth.HTTPAuthMiddleware("http_user", logger)).Get("/events/{id}", breakerWrapper(breaker, eventSvc.GetEvent))
+
+    // Protected routes with authentication
+    httpRouter.Group(func(r chi.Router) {
+        r.Use(authenticator.HTTPAuthMiddleware)
+        r.Get("/events", breakerWrapper(breaker, eventSvc.GetActiveEvents))
+        r.Get("/events/{id}", breakerWrapper(breaker, eventSvc.GetEvent))
+    })
 
     // Single handler to multiplex HTTP and gRPC
     handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +95,7 @@ func NewServer(logger *zap.Logger) *Server {
         grpcServer: grpcServer,
         eventSvc:   eventSvc,
         breaker:    breaker,
+        db:         database,
     }
 }
 
