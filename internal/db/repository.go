@@ -1,11 +1,9 @@
 package db
 
 import (
-	"log"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -33,21 +31,12 @@ type eventRepository struct {
 	db *gorm.DB
 }
 
-func NewEventRepository(dbPath string) EventRepository {
-	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
-	if err != nil {
-		log.Fatalf("failed to connect database: %v", err)
+func NewEventRepository(db *gorm.DB) EventRepository {
+	// Auto migrate the schema
+	if err := db.AutoMigrate(&Event{}); err != nil {
+		panic(err)
 	}
-
-	// Auto Migrate the schema
-	err = db.AutoMigrate(&Event{})
-	if err != nil {
-		log.Fatalf("failed to migrate database: %v", err)
-	}
-
-	return &eventRepository{
-		db: db,
-	}
+	return &eventRepository{db: db}
 }
 
 func (r *eventRepository) GetActiveEvents() ([]Event, error) {

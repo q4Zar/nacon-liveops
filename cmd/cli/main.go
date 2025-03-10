@@ -87,13 +87,13 @@ var createUserCmd = &cobra.Command{
             log.Fatal("Invalid user type. Must be 'http' or 'admin'")
         }
 
-        // Open database connection
-        gormDB, err := gorm.Open(sqlite.Open("./liveops.db"), &gorm.Config{})
+        // Initialize database
+        database, err := db.NewDB("./liveops.db")
         if err != nil {
-            log.Fatalf("Failed to connect database: %v", err)
+            log.Fatalf("Failed to initialize database: %v", err)
         }
 
-        userRepo := db.NewUserRepository(gormDB)
+        userRepo := db.NewUserRepository(database.DB)
         err = userRepo.CreateUser(username, password, uType)
         if err != nil {
             log.Fatalf("Failed to create user: %v", err)
@@ -426,14 +426,14 @@ func createUserInteractive() {
     var userType string
     survey.AskOne(typePrompt, &userType)
 
-    // Open database connection
-    gormDB, err := gorm.Open(sqlite.Open("./liveops.db"), &gorm.Config{})
+    // Initialize database
+    database, err := db.NewDB("./liveops.db")
     if err != nil {
-        log.Printf("Failed to connect database: %v", err)
+        log.Printf("Failed to initialize database: %v", err)
         return
     }
 
-    userRepo := db.NewUserRepository(gormDB)
+    userRepo := db.NewUserRepository(database.DB)
     err = userRepo.CreateUser(username, password, db.UserType(userType))
     if err != nil {
         log.Printf("Failed to create user: %v", err)
