@@ -26,9 +26,27 @@ docker compose run --rm -it cli
 ## TODO : Optimisations
 
 ```
-- JWT not hardcoded
 - use GORM
-- stressclient (balance tests gRPC & HTTP)
+
+- JWT not hardcoded
+
 - tweak rate-limit from env
+
 - build protobuf in docker
+  
+- env variables from docker compose to *.go
+- unit
+  - auth
+  - event
+
+- stress
+  - 1 min
+    - x 5 sec
+      - create 100 event
+      - get 50 lists
+      - get 1000 events
+      - update 20
+    - delete all
+
+- caching system if event not updated serve cache
 ```
