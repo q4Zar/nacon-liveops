@@ -2,17 +2,14 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"liveops/api"
 	"liveops/internal/auth"
-	"liveops/internal/db"
 	"liveops/internal/event"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/sony/gobreaker"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -20,6 +17,7 @@ import (
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
+	"gorm.io/gorm"
 )
 
 type Server struct {
@@ -29,24 +27,20 @@ type Server struct {
     breaker    *gobreaker.CircuitBreaker
 }
 
-func NewServer(logger *zap.Logger) *Server {
-    dbConn, err := sql.Open("sqlite3", "./liveops.db")
-    if err != nil {
-        logger.Fatal("failed to open database", zap.Error(err))
-    }
-    dbConn.SetMaxOpenConns(20)
-    dbConn.SetMaxIdleConns(10)
-
-    eventRepo := db.NewEventRepository(dbConn)
+func NewServer(logger *zap.Logger, db *gorm.DB) *Server {
+    // Initialize event repository and service with GORM
+    eventRepo := db.NewEventRepository(db)
     eventSvc := event.NewService(eventRepo, logger)
 
+    // gRPC server setup
     grpcServer := grpc.NewServer(
         grpc.UnaryInterceptor(auth.GRPCAuthInterceptor(logger)),
         grpc.MaxConcurrentStreams(100),
     )
     api.RegisterLiveOpsServiceServer(grpcServer, eventSvc)
-    reflection.Register(grpcServer) // Enable reflection for grpcurl
+    reflection.Register(grpcServer)
 
+    // Circuit breaker for HTTP
     breaker := gobreaker.NewCircuitBreaker(gobreaker.Settings{
         Name:        "http-breaker",
         MaxRequests: 5,
@@ -57,22 +51,23 @@ func NewServer(logger *zap.Logger) *Server {
         },
     })
 
-    httpRouter := chi.NewRouter() // Renamed for clarity
+    // HTTP router with middleware
+    httpRouter := chi.NewRouter()
     httpRouter.Use(RateLimit(100, 10))
     httpRouter.Use(TimeoutMiddleware(5 * time.Second))
     httpRouter.With(auth.HTTPAuthMiddleware("http_user", logger)).Get("/events", breakerWrapper(breaker, eventSvc.GetActiveEvents))
     httpRouter.With(auth.HTTPAuthMiddleware("http_user", logger)).Get("/events/{id}", breakerWrapper(breaker, eventSvc.GetEvent))
 
-    // Single handler to multiplex HTTP and gRPC
+    // Multiplex HTTP and gRPC
     handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         if r.ProtoMajor == 2 && r.Header.Get("Content-Type") == "application/grpc" {
             grpcServer.ServeHTTP(w, r)
         } else {
-            httpRouter.ServeHTTP(w, r) // Use the Chi router for HTTP
+            httpRouter.ServeHTTP(w, r)
         }
     })
 
-    // Wrap with h2c to support HTTP/2 cleartext
+    // Wrap with h2c for HTTP/2 cleartext
     h2s := &http2.Server{}
     h2cHandler := h2c.NewHandler(handler, h2s)
 
