@@ -22,10 +22,11 @@ docker compose run --rm -it cli
 ```
 
 ## TODO : Optimisations
+
 ```
 - JWT not hardcoded
 - use GORM
 - stressclient (balance tests gRPC & HTTP)
 - tweak rate-limit from env
-- ...
+- build protobuf in docker
 ```
