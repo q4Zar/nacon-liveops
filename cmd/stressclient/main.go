@@ -24,15 +24,15 @@ import (
 
 const (
     duration        = 60 * time.Second     // 1 minute stress test
-    grpcConcurrency = 10                   // Keep high for gRPC
-    httpConcurrency = 2                    // Reduce for HTTP to hit rate limit moderately
+    grpcConcurrency = 10                   // Workers for gRPC operations
+    httpConcurrency = 2                    // Workers for HTTP operations
     grpcAuthKey     = "admin-key-456"      // For gRPC
     httpAuthKey     = "public-key-123"     // For HTTP
-    requestDelay    = 5 * time.Millisecond // Slight delay to avoid resource exhaustion
+    requestDelay    = 5 * time.Millisecond // Throttle requests
 )
 
 var (
-    eventIDs      []string      // Store created event IDs
+    eventIDs      []string      // Store successfully created event IDs
     eventIDsMutex sync.Mutex    // Protect access to eventIDs
     httpClient    = &http.Client{Timeout: 5 * time.Second}
     httpAddr      = getServerURL()      // HTTP server URL
@@ -43,14 +43,14 @@ func getServerURL() string {
     if url := os.Getenv("SERVER_URL"); url != "" {
         return url
     }
-    return "http://localhost:8080" // Default if not set
+    return "http://localhost:8080"
 }
 
 func getGRPCServerURL() string {
     if url := os.Getenv("GRPC_SERVER_URL"); url != "" {
         return url
     }
-    return "localhost:8080" // Default if not set
+    return "localhost:8080"
 }
 
 type opStats struct {
@@ -63,7 +63,7 @@ func init() {
     rand.Seed(time.Now().UnixNano())
 }
 
-// randomString generates a random string of given length using crypto/rand
+// randomString generates a random string of given length
 func randomString(length int) string {
     const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     b := make([]byte, length)
@@ -74,16 +74,6 @@ func randomString(length int) string {
     return string(b)
 }
 
-// randomEventID returns a random event ID from the created list
-func randomEventID() string {
-    eventIDsMutex.Lock()
-    defer eventIDsMutex.Unlock()
-    if len(eventIDs) == 0 {
-        return ""
-    }
-    return eventIDs[rand.Intn(len(eventIDs))]
-}
-
 // stressOperation runs a function continuously until the context expires
 func stressOperation(ctx context.Context, name string, fn func(context.Context, *opStats), stats *opStats) {
     for {
@@ -92,7 +82,7 @@ func stressOperation(ctx context.Context, name string, fn func(context.Context, 
             return
         default:
             fn(ctx, stats)
-            time.Sleep(requestDelay) // Throttle requests
+            time.Sleep(requestDelay)
         }
     }
 }
@@ -127,10 +117,14 @@ func createEvent(client api.LiveOpsServiceClient) func(context.Context, *opStats
 // updateEvent sends a gRPC UpdateEvent request
 func updateEvent(client api.LiveOpsServiceClient) func(context.Context, *opStats) {
     return func(ctx context.Context, stats *opStats) {
-        id := randomEventID()
-        if id == "" {
+        eventIDsMutex.Lock()
+        if len(eventIDs) == 0 {
+            eventIDsMutex.Unlock()
             return
         }
+        id := eventIDs[rand.Intn(len(eventIDs))]
+        eventIDsMutex.Unlock()
+
         now := time.Now()
         req := &api.EventRequest{
             Id:          id,
@@ -144,25 +138,6 @@ func updateEvent(client api.LiveOpsServiceClient) func(context.Context, *opStats
         _, err := client.UpdateEvent(ctx, req)
         if err != nil {
             log.Printf("Failed to update event %s: %v", id, err)
-            atomic.AddUint64(&stats.Failed, 1)
-            return
-        }
-        atomic.AddUint64(&stats.Success, 1)
-    }
-}
-
-// deleteEvent sends a gRPC DeleteEvent request
-func deleteEvent(client api.LiveOpsServiceClient) func(context.Context, *opStats) {
-    return func(ctx context.Context, stats *opStats) {
-        id := randomEventID()
-        if id == "" {
-            return
-        }
-        req := &api.DeleteRequest{Id: id}
-
-        _, err := client.DeleteEvent(ctx, req)
-        if err != nil {
-            log.Printf("Failed to delete event %s: %v", id, err)
             atomic.AddUint64(&stats.Failed, 1)
             return
         }
@@ -225,10 +200,14 @@ func fetchActiveEvents() func(context.Context, *opStats) {
 // fetchEventByID makes an HTTP GET /events/{id} request
 func fetchEventByID() func(context.Context, *opStats) {
     return func(ctx context.Context, stats *opStats) {
-        id := randomEventID()
-        if id == "" {
+        eventIDsMutex.Lock()
+        if len(eventIDs) == 0 {
+            eventIDsMutex.Unlock()
             return
         }
+        id := eventIDs[rand.Intn(len(eventIDs))]
+        eventIDsMutex.Unlock()
+
         url := fmt.Sprintf("%s/events/%s", httpAddr, id)
         req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
         if err != nil {
@@ -256,7 +235,36 @@ func fetchEventByID() func(context.Context, *opStats) {
     }
 }
 
-// getEventCount fetches the current number of events via ListEvents
+// deleteEvents deletes exactly the number of successfully created events
+func deleteEvents(ctx context.Context, client api.LiveOpsServiceClient, stats *opStats, createSuccess uint64) {
+    eventIDsMutex.Lock()
+    ids := make([]string, len(eventIDs))
+    copy(ids, eventIDs)
+    eventIDsMutex.Unlock()
+
+    // Limit deletions to the number of successful creations
+    deleteCount := int(min(uint64(len(ids)), createSuccess))
+    for i := 0; i < deleteCount; i++ {
+        req := &api.DeleteRequest{Id: ids[i]}
+        _, err := client.DeleteEvent(ctx, req)
+        if err != nil {
+            log.Printf("Failed to delete event %s: %v", ids[i], err)
+            atomic.AddUint64(&stats.Failed, 1)
+        } else {
+            atomic.AddUint64(&stats.Success, 1)
+        }
+    }
+}
+
+// min returns the smaller of two uint64 values
+func min(a, b uint64) uint64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+// getEventCount fetches the current number of events
 func getEventCount(client api.LiveOpsServiceClient, ctx context.Context) (int, error) {
     resp, err := client.ListEvents(ctx, &api.Empty{})
     if err != nil {
@@ -278,33 +286,35 @@ func main() {
 
     grpcClient := api.NewLiveOpsServiceClient(conn)
 
-    // Context with 1-minute timeout for stress test
+    // Context for the stress test duration
     ctx, cancel := context.WithTimeout(context.Background(), duration)
     defer cancel()
 
     // Add gRPC authorization header
     ctx = metadata.AppendToOutgoingContext(ctx, "authorization", grpcAuthKey)
 
-    // Operations to stress test
+    // Operations to run during the test (excluding DeleteEvent)
     operations := []struct {
         name    string
-        fn      func(api.LiveOpsServiceClient) func(context.Context, *opStats) // gRPC
-        httpFn  func() func(context.Context, *opStats)                         // HTTP
+        fn      func(api.LiveOpsServiceClient) func(context.Context, *opStats)
+        httpFn  func() func(context.Context, *opStats)
         stats   opStats
         workers int
     }{
         {"CreateEvent", createEvent, nil, opStats{}, grpcConcurrency},
         {"UpdateEvent", updateEvent, nil, opStats{}, grpcConcurrency},
-        {"DeleteEvent", deleteEvent, nil, opStats{}, grpcConcurrency},
         {"ListEvents", listEvents, nil, opStats{}, grpcConcurrency},
         {"FetchActiveEvents", nil, fetchActiveEvents, opStats{}, httpConcurrency},
         {"FetchEventByID", nil, fetchEventByID, opStats{}, httpConcurrency},
     }
 
-    var wg sync.WaitGroup
-    log.Printf("Starting continuous stress test for %v with %d gRPC workers and %d HTTP workers per operation, targeting HTTP: %s, gRPC: %s", duration, grpcConcurrency, httpConcurrency, httpAddr, grpcAddr)
+    // Delete operation stats (run at the end)
+    deleteStats := opStats{}
 
-    // Start workers for each operation
+    var wg sync.WaitGroup
+    log.Printf("Starting stress test for %v with %d gRPC workers and %d HTTP workers, targeting HTTP: %s, gRPC: %s", duration, grpcConcurrency, httpConcurrency, httpAddr, grpcAddr)
+
+    // Start workers for all operations except delete
     for i := range operations {
         op := &operations[i]
         for j := 0; j < op.workers; j++ {
@@ -326,8 +336,13 @@ func main() {
         }
     }
 
-    // Wait for the duration to complete
+    // Wait for the stress test duration
     wg.Wait()
+
+    // Perform deletions equal to successful creations
+    createSuccess := operations[0].stats.Success // CreateEvent is index 0
+    log.Printf("Cleaning up: Deleting %d events (equal to successful creations)...", createSuccess)
+    deleteEvents(ctx, grpcClient, &deleteStats, createSuccess)
 
     // Get final event count
     finalCtx, finalCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -359,6 +374,17 @@ func main() {
         log.Printf("  Rate Limited: %d", op.stats.RateLimited)
         log.Printf("  Getter (Reads): %d", getterCount)
     }
+    // Add DeleteEvent stats
+    total := deleteStats.Success + deleteStats.Failed + deleteStats.RateLimited
+    totalRequests += total
+    totalSuccess += deleteStats.Success
+    log.Printf("DeleteEvent:")
+    log.Printf("  Total Requests: %d", total)
+    log.Printf("  Success: %d", deleteStats.Success)
+    log.Printf("  Failed: %d", deleteStats.Failed)
+    log.Printf("  Rate Limited: %d", deleteStats.RateLimited)
+    log.Printf("  Getter (Reads): 0")
+
     successRate := float64(totalSuccess) / float64(totalRequests) * 100
     log.Printf("Summary:")
     log.Printf("  Total Requests: %d", totalRequests)
