@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"liveops/api"
 	"liveops/internal/auth"
 	"liveops/internal/db"
@@ -30,14 +29,7 @@ type Server struct {
 }
 
 func NewServer(logger *zap.Logger) *Server {
-    dbConn, err := sql.Open("sqlite3", "./liveops.db")
-    if err != nil {
-        logger.Fatal("failed to open database", zap.Error(err))
-    }
-    dbConn.SetMaxOpenConns(20)
-    dbConn.SetMaxIdleConns(10)
-
-    eventRepo := db.NewEventRepository(dbConn)
+    eventRepo := db.NewEventRepository("./liveops.db")
     eventSvc := event.NewService(eventRepo, logger)
 
     grpcServer := grpc.NewServer(
@@ -57,7 +49,7 @@ func NewServer(logger *zap.Logger) *Server {
         },
     })
 
-    httpRouter := chi.NewRouter() // Renamed for clarity
+    httpRouter := chi.NewRouter()
     httpRouter.Use(RateLimit(100, 10))
     httpRouter.Use(TimeoutMiddleware(5 * time.Second))
     httpRouter.With(auth.HTTPAuthMiddleware("http_user", logger)).Get("/events", breakerWrapper(breaker, eventSvc.GetActiveEvents))
@@ -68,7 +60,7 @@ func NewServer(logger *zap.Logger) *Server {
         if r.ProtoMajor == 2 && r.Header.Get("Content-Type") == "application/grpc" {
             grpcServer.ServeHTTP(w, r)
         } else {
-            httpRouter.ServeHTTP(w, r) // Use the Chi router for HTTP
+            httpRouter.ServeHTTP(w, r)
         }
     })
 
