@@ -12,6 +12,11 @@ services:
     environment:
       - GO111MODULE=on
       - GOPROXY=https://goproxy.io
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   stressclient:
     build:
       context: .
@@ -34,5 +39,15 @@ services:
     environment:
       - SERVER_URL=http://go-nacon:8080
       - GRPC_SERVER_URL=go-nacon:8080
-    tty: true  # Allocate a pseudo-TTY
-    stdin_open: true  # Keep stdin open for input
+    tty: true # Allocate a pseudo-TTY
+    stdin_open: true # Keep stdin open for input
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test
+    depends_on:
+      - go-nacon
+    environment:
+      - GO111MODULE=on
+      - GOPROXY=https://goproxy.io

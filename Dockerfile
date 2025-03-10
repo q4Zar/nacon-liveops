@@ -8,6 +8,10 @@ RUN CGO_ENABLED=1 GOOS=linux go build -o liveops ./cmd/server
 RUN CGO_ENABLED=1 GOOS=linux go build -o stressclient ./cmd/stressclient
 RUN CGO_ENABLED=1 GOOS=linux go build -o liveops-cli ./cmd/cli
 
+# Unit Test Stage
+FROM builder AS test
+RUN go test -v ./internal/event
+
 # Server stage
 FROM debian:bookworm-slim AS server
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*

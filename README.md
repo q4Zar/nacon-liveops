@@ -15,6 +15,8 @@ A Golang backend using Chi for RESTful HTTP APIs and gRPC for internal operation
 ```sh
 # server as daemon
 docker compose up --build -d go-nacon
+# event unit test
+go test -v ./internal/event
 # stress client
 docker compose up --build stressclient
 # cli interactive
