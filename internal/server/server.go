@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"liveops/api"
@@ -251,7 +252,6 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetActiveEvents(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	events, err := s.eventRepo.GetActiveEvents()
 	if err != nil {
 		s.logger.Error("Failed to get active events", zap.Error(err))
@@ -268,7 +268,6 @@ func (s *Server) handleGetActiveEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetEventByID(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	eventID := chi.URLParam(r, "id")
 	if eventID == "" {
 		http.Error(w, "Event ID is required", http.StatusBadRequest)
@@ -276,14 +275,13 @@ func (s *Server) handleGetEventByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	event, err := s.eventRepo.GetEvent(eventID)
+	if err == sql.ErrNoRows {
+		http.Error(w, "Event not found", http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		s.logger.Error("Failed to get event", zap.String("id", eventID), zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to get event: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	if event == nil {
-		http.Error(w, "Event not found", http.StatusNotFound)
 		return
 	}
 
