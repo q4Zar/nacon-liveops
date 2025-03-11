@@ -109,6 +109,38 @@ func GRPCAuthInterceptor(userRepo db.UserRepository) grpc.UnaryServerInterceptor
 
 // ExtractUserFromContext extracts user information from the JWT token in the context
 func ExtractUserFromContext(ctx context.Context) (*db.User, error) {
+	// Try to get token from gRPC metadata first
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		authHeader := md.Get("authorization")
+		if len(authHeader) == 0 {
+			return nil, errors.New("no authorization header found in metadata")
+		}
+
+		tokenString := strings.TrimPrefix(authHeader[0], "Bearer ")
+		token, err := tokenAuth.Decode(tokenString)
+		if err != nil {
+			return nil, fmt.Errorf("invalid token: %v", err)
+		}
+
+		if err := jwt.Validate(token); err != nil {
+			return nil, errors.New("invalid token")
+		}
+
+		claims, err := token.AsMap(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get claims: %v", err)
+		}
+
+		user := &db.User{
+			ID:       claims["user_id"].(string),
+			Username: claims["username"].(string),
+			Type:     db.UserType(claims["user_type"].(string)),
+		}
+
+		return user, nil
+	}
+
+	// Fallback to HTTP context
 	token, claims, err := jwtauth.FromContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get token from context: %v", err)
