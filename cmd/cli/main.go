@@ -153,11 +153,19 @@ func loadCredentials() *Credentials {
 
 // saveCredentials saves credentials to disk
 func saveCredentials(creds *Credentials) error {
+    path := getCredentialsPath()
+    fmt.Printf("Saving credentials to: %s\n", path)
+    
     data, err := json.Marshal(creds)
     if err != nil {
-        return err
+        return fmt.Errorf("failed to marshal credentials: %v", err)
     }
-    return os.WriteFile(getCredentialsPath(), data, 0600)
+
+    if err := os.WriteFile(path, data, 0600); err != nil {
+        return fmt.Errorf("failed to write credentials file: %v", err)
+    }
+
+    return nil
 }
 
 // authenticate handles user authentication
@@ -188,14 +196,23 @@ func authenticate() error {
 }
 
 func signUp() error {
+    fmt.Println("Starting signup process...")
     var username, password string
     survey.AskOne(&survey.Input{
         Message: "Enter username:",
     }, &username)
 
+    if username == "" {
+        return fmt.Errorf("username cannot be empty")
+    }
+
     survey.AskOne(&survey.Password{
         Message: "Enter password:",
     }, &password)
+
+    if password == "" {
+        return fmt.Errorf("password cannot be empty")
+    }
 
     typePrompt := &survey.Select{
         Message: "Select user type:",
@@ -204,17 +221,23 @@ func signUp() error {
     var userType string
     survey.AskOne(typePrompt, &userType)
 
+    fmt.Printf("Creating user with username: %s, type: %s\n", username, userType)
+
     // Create the user
     database, err := db.NewDB("./liveops.db")
     if err != nil {
+        fmt.Printf("Database connection error: %v\n", err)
         return fmt.Errorf("failed to initialize database: %v", err)
     }
 
     userRepo := db.NewUserRepository(database.DB)
     err = userRepo.CreateUser(username, password, db.UserType(userType))
     if err != nil {
+        fmt.Printf("User creation error: %v\n", err)
         return fmt.Errorf("failed to create user: %v", err)
     }
+
+    fmt.Printf("User created successfully in database\n")
 
     // Store credentials
     token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
@@ -223,7 +246,15 @@ func signUp() error {
         UserType: db.UserType(userType),
         Token:    token,
     }
-    return saveCredentials(credentials)
+
+    if err := saveCredentials(credentials); err != nil {
+        fmt.Printf("Warning: Failed to save credentials locally: %v\n", err)
+    } else {
+        fmt.Printf("Credentials saved successfully\n")
+    }
+
+    fmt.Printf("Signup completed successfully. You are now logged in as %s (%s)\n", username, userType)
+    return nil
 }
 
 func signIn() error {
