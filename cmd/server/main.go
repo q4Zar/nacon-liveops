@@ -1,10 +1,9 @@
 package main
 
 import (
-    "liveops/internal/server"
-    "net"
+	"liveops/internal/server"
 
-    "go.uber.org/zap"
+	"go.uber.org/zap"
 )
 
 func main() {
