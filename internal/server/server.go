@@ -309,7 +309,7 @@ func (s *Server) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.E
 }
 
 // ListEvents returns a list of all events
-func (s *Server) ListEvents(ctx context.Context, req *api.Empty) (*api.EventListResponse, error) {
+func (s *Server) ListEvents(ctx context.Context, req *api.Empty) (*api.EventsResponse, error) {
 	user, err := auth.ExtractUserFromContext(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "invalid authentication: %v", err)
@@ -339,7 +339,7 @@ func (s *Server) ListEvents(ctx context.Context, req *api.Empty) (*api.EventList
 		})
 	}
 
-	return &api.EventListResponse{
+	return &api.EventsResponse{
 		Events: protoEvents,
 	}, nil
 }
