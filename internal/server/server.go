@@ -308,4 +308,40 @@ func (s *Server) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.E
 	return &api.EventResponse{}, nil
 }
 
+// ListEvents returns a list of all events
+func (s *Server) ListEvents(ctx context.Context, req *api.Empty) (*api.EventListResponse, error) {
+	user, err := auth.ExtractUserFromContext(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "invalid authentication: %v", err)
+	}
+
+	if user.Type != db.UserTypeAdmin {
+		return nil, status.Error(codes.PermissionDenied, "admin access required")
+	}
+
+	events, err := s.eventRepo.ListEvents()
+	if err != nil {
+		s.logger.Error("Failed to get events", zap.Error(err))
+		return nil, status.Errorf(codes.Internal, "failed to get events: %v", err)
+	}
+
+	var protoEvents []*api.EventResponse
+	for _, event := range events {
+		protoEvents = append(protoEvents, &api.EventResponse{
+			Id:          event.ID,
+			Title:       event.Title,
+			Description: event.Description,
+			StartTime:   event.StartTimeUnix,
+			EndTime:     event.EndTimeUnix,
+			Rewards:     event.Rewards,
+			CreatedAt:   event.CreatedAt,
+			UpdatedAt:   event.UpdatedAt,
+		})
+	}
+
+	return &api.EventListResponse{
+		Events: protoEvents,
+	}, nil
+}
+
 // ... other gRPC methods with similar authentication checks ...
