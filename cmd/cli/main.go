@@ -370,8 +370,6 @@ func runInteractive() {
             fetchActiveEvents()
         case "fetch-by-id":
             fetchEventByID()
-        case "create-user":
-            createUserInteractive()
         }
     }
 }
@@ -385,7 +383,6 @@ func selectAction() string {
         "list (gRPC: ListEvents)",
         "fetch-active (HTTP: GET /events)",
         "fetch-by-id (HTTP: GET /events/{id})",
-        "create-user (Create new user)",
         "exit",
     }
     prompt := &survey.Select{
@@ -618,39 +615,4 @@ func printResponse(method string, resp interface{}) {
         return
     }
     fmt.Printf("%s Response:\n%s\n\n", method, string(data))
-}
-
-func createUserInteractive() {
-    var username, password string
-    prompt := &survey.Input{
-        Message: "Enter username:",
-    }
-    survey.AskOne(prompt, &username)
-
-    survey.AskOne(&survey.Password{
-        Message: "Enter password:",
-    }, &password)
-
-    typePrompt := &survey.Select{
-        Message: "Select user type:",
-        Options: []string{"http", "admin"},
-    }
-    var userType string
-    survey.AskOne(typePrompt, &userType)
-
-    // Initialize database
-    database, err := db.NewDB("./liveops.db")
-    if err != nil {
-        log.Printf("Failed to initialize database: %v", err)
-        return
-    }
-
-    userRepo := db.NewUserRepository(database.DB)
-    err = userRepo.CreateUser(username, password, db.UserType(userType))
-    if err != nil {
-        log.Printf("Failed to create user: %v", err)
-        return
-    }
-
-    fmt.Printf("User %s created successfully with type %s\n", username, userType)
 }
