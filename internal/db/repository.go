@@ -15,6 +15,8 @@ type Event struct {
 	EndTime     *timestamppb.Timestamp `gorm:"-"`
 	StartTimeUnix int64 `gorm:"column:start_time"`
 	EndTimeUnix   int64 `gorm:"column:end_time"`
+	CreatedAt   int64 `gorm:"autoCreateTime"`
+	UpdatedAt   int64 `gorm:"autoUpdateTime"`
 	Rewards     string
 }
 
@@ -72,12 +74,15 @@ func (r *eventRepository) GetEvent(id string) (Event, error) {
 func (r *eventRepository) CreateEvent(e Event) error {
 	e.StartTimeUnix = e.StartTime.AsTime().Unix()
 	e.EndTimeUnix = e.EndTime.AsTime().Unix()
+	e.CreatedAt = time.Now().Unix()
+	e.UpdatedAt = time.Now().Unix()
 	return r.db.Create(&e).Error
 }
 
 func (r *eventRepository) UpdateEvent(e Event) error {
 	e.StartTimeUnix = e.StartTime.AsTime().Unix()
 	e.EndTimeUnix = e.EndTime.AsTime().Unix()
+	e.UpdatedAt = time.Now().Unix()
 	return r.db.Save(&e).Error
 }
 

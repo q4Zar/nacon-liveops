@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Service struct {
@@ -34,9 +35,11 @@ func toEventResponse(e db.Event) *api.EventResponse {
 		Id:          e.ID,
 		Title:       e.Title,
 		Description: e.Description,
-		StartTime:   e.StartTime,
-		EndTime:     e.EndTime,
+		StartTime:   e.StartTime.AsTime().Unix(),
+		EndTime:     e.EndTime.AsTime().Unix(),
 		Rewards:     e.Rewards,
+		CreatedAt:   e.CreatedAt,
+		UpdatedAt:   e.UpdatedAt,
 	}
 }
 
@@ -46,8 +49,8 @@ func toDBEvent(req *api.EventRequest) db.Event {
 		ID:          req.Id,
 		Title:       req.Title,
 		Description: req.Description,
-		StartTime:   req.StartTime,
-		EndTime:     req.EndTime,
+		StartTime:   timestamppb.New(time.Unix(req.StartTime, 0)),
+		EndTime:     timestamppb.New(time.Unix(req.EndTime, 0)),
 		Rewards:     req.Rewards,
 	}
 }
@@ -132,7 +135,8 @@ func (s *Service) ListEvents(ctx context.Context, req *api.Empty) (*api.EventsRe
 	return &api.EventsResponse{Events: apiEvents}, nil
 }
 
-func (s *Service) GetActiveEvents(w http.ResponseWriter, r *http.Request) {
+// HandleGetActiveEvents handles HTTP GET /events
+func (s *Service) HandleGetActiveEvents(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Received GET /events request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
 	events, err := s.repo.GetActiveEvents()
 	if err != nil {
@@ -148,7 +152,8 @@ func (s *Service) GetActiveEvents(w http.ResponseWriter, r *http.Request) {
 	for i, e := range events {
 		i, e := i, e
 		g.Go(func() error {
-			data, err := json.Marshal(e)
+			apiEvent := toEventResponse(e)
+			data, err := json.Marshal(apiEvent)
 			if err != nil {
 				return err
 			}
@@ -175,7 +180,8 @@ func (s *Service) GetActiveEvents(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Successfully returned active events", zap.Int("count", len(events)))
 }
 
-func (s *Service) GetEvent(w http.ResponseWriter, r *http.Request) {
+// HandleGetEvent handles HTTP GET /events/{id}
+func (s *Service) HandleGetEvent(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	s.logger.Info("Received GET /events/{id} request", zap.String("method", r.Method), zap.String("path", r.URL.Path), zap.String("id", id))
 	if id == "" {
@@ -197,33 +203,11 @@ func (s *Service) GetEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(event); err != nil {
+	apiEvent := toEventResponse(event)
+	if err := json.NewEncoder(w).Encode(apiEvent); err != nil {
 		s.logger.Error("Failed to encode event", zap.String("id", id), zap.Error(err))
 		http.Error(w, `{"error": "failed to encode response"}`, http.StatusInternalServerError)
 		return
 	}
 	s.logger.Info("Successfully returned event", zap.String("id", id))
-}
-
-func (s *Service) ListEvents(ctx context.Context, req *api.Empty) (*api.EventsResponse, error) {
-	s.logger.Info("Received ListEvents request")
-	events, err := s.repo.ListEvents()
-	if err != nil {
-		s.logger.Error("Failed to list events", zap.Error(err))
-		return nil, err
-	}
-
-	var respEvents []*api.EventResponse
-	for _, e := range events {
-		respEvents = append(respEvents, &api.EventResponse{
-			Id:          e.ID,
-			Title:       e.Title,
-			Description: e.Description,
-			StartTime:   e.StartTime.AsTime().Unix(),
-			EndTime:     e.EndTime.AsTime().Unix(),
-			Rewards:     e.Rewards,
-		})
-	}
-	s.logger.Info("Successfully returned events", zap.Int("count", len(events)))
-	return &api.EventsResponse{Events: respEvents}, nil
 }

@@ -25,6 +25,8 @@ message EventResponse {
   int64 start_time = 4;
   int64 end_time = 5;
   string rewards = 6;
+  int64 created_at = 7;
+  int64 updated_at = 8;
 }
 
 message DeleteRequest {
