@@ -11,6 +11,8 @@ import (
 	"liveops/internal/event"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -41,8 +43,14 @@ type Server struct {
 }
 
 func NewServer(logger *zap.Logger) *Server {
+	// Get environment variables
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = "./liveops.db" // fallback to default
+	}
+
 	// Initialize database
-	database, err := db.NewDB("./liveops.db")
+	database, err := db.NewDB(dbPath)
 	if err != nil {
 		logger.Fatal("failed to initialize database", zap.Error(err))
 	}
@@ -54,14 +62,20 @@ func NewServer(logger *zap.Logger) *Server {
 	// Initialize services
 	eventSvc := event.NewService(eventRepo, logger)
 
+	// Get circuit breaker configuration from environment
+	cbMaxRequests := getEnvInt("CB_MAX_REQUESTS", 5)
+	cbInterval := getEnvInt("CB_INTERVAL", 60)
+	cbTimeout := getEnvInt("CB_TIMEOUT", 10)
+	cbConsecutiveFailures := getEnvInt("CB_CONSECUTIVE_FAILURES", 3)
+
 	// Initialize circuit breaker
 	breaker := gobreaker.NewCircuitBreaker(gobreaker.Settings{
 		Name:        "http-breaker",
-		MaxRequests: 5,
-		Interval:    60 * time.Second,
-		Timeout:     10 * time.Second,
+		MaxRequests: uint32(cbMaxRequests),
+		Interval:    time.Duration(cbInterval) * time.Second,
+		Timeout:     time.Duration(cbTimeout) * time.Second,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			return counts.ConsecutiveFailures > 3
+			return counts.ConsecutiveFailures > uint32(cbConsecutiveFailures)
 		},
 	})
 
@@ -87,12 +101,36 @@ func NewServer(logger *zap.Logger) *Server {
 	return server
 }
 
+// getEnvInt retrieves an environment variable as integer or returns a default value
+func getEnvInt(key string, defaultValue int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	intValue, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultValue
+	}
+	return intValue
+}
+
 func (s *Server) Start(addr string) error {
+	// Get JWT secret from environment
+	jwtSecret := os.Getenv("JWT_SECRET_KEY")
+	if jwtSecret == "" {
+		s.logger.Warn("JWT_SECRET_KEY not set, using default (not recommended for production)")
+		jwtSecret = "your-secret-key-here"
+	}
+
 	// Initialize JWT
-	auth.InitJWT([]byte("your-secret-key-here"))
+	auth.InitJWT([]byte(jwtSecret))
 
 	// Create router
 	r := chi.NewRouter()
+
+	// Get rate limiter configuration from environment
+	rateLimit := float64(getEnvInt("RATE_LIMIT", 100))
+	rateBurst := getEnvInt("RATE_BURST", 10)
 
 	// Middleware
 	r.Use(middleware.Logger)
@@ -105,7 +143,7 @@ func (s *Server) Start(addr string) error {
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
-	r.Use(RateLimit(100, 10))
+	r.Use(RateLimit(rateLimit, rateBurst))
 	r.Use(TimeoutMiddleware(5 * time.Second))
 
 	// Public routes

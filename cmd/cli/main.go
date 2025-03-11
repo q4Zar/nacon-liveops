@@ -26,8 +26,8 @@ import (
 )
 
 const (
-    defaultServerURL     = "http://go-nacon:8080" // HTTP default
-    defaultGRPCServerURL = "go-nacon:8080"        // gRPC default
+    defaultServerURL     = "http://localhost:8080" // HTTP default
+    defaultGRPCServerURL = "localhost:8080"        // gRPC default
     grpcAuthKey          = "admin-key-456"        // gRPC auth
     httpAuthKey          = "public-key-123"       // HTTP auth
 )
@@ -77,49 +77,60 @@ var userCmd = &cobra.Command{
 }
 
 // createUserCmd creates a new user
-var createUserCmd = &cobra.Command{
-    Use:   "create",
-    Short: "Create a new user",
-    Run: func(cmd *cobra.Command, args []string) {
-        username, _ := cmd.Flags().GetString("username")
-        password, _ := cmd.Flags().GetString("password")
-        userType, _ := cmd.Flags().GetString("type")
+func createUserCmd() *cobra.Command {
+    cmd := &cobra.Command{
+        Use:   "create",
+        Short: "Create a new user",
+        Run: func(cmd *cobra.Command, args []string) {
+            username, _ := cmd.Flags().GetString("username")
+            password, _ := cmd.Flags().GetString("password")
+            userType, _ := cmd.Flags().GetString("type")
 
-        if username == "" || password == "" {
-            log.Fatal("Username and password are required")
-        }
+            if username == "" || password == "" {
+                log.Fatal("Username and password are required")
+            }
 
-        // Validate user type
-        uType := db.UserType(userType)
-        if uType != db.UserTypeHTTP && uType != db.UserTypeAdmin {
-            log.Fatal("Invalid user type. Must be 'http' or 'admin'")
-        }
+            // Validate user type
+            uType := db.UserType(userType)
+            if uType != db.UserTypeHTTP && uType != db.UserTypeAdmin {
+                log.Fatal("Invalid user type. Must be 'http' or 'admin'")
+            }
 
-        // Initialize database
-        database, err := db.NewDB("./liveops.db")
-        if err != nil {
-            log.Fatalf("Failed to initialize database: %v", err)
-        }
+            // Get database path from environment
+            dbPath := os.Getenv("DB_PATH")
+            if dbPath == "" {
+                dbPath = "./liveops.db" // fallback to default
+            }
 
-        userRepo := db.NewUserRepository(database.DB)
-        err = userRepo.CreateUser(username, password, uType)
-        if err != nil {
-            log.Fatalf("Failed to create user: %v", err)
-        }
+            // Initialize database
+            database, err := db.NewDB(dbPath)
+            if err != nil {
+                log.Fatalf("Failed to initialize database: %v", err)
+            }
 
-        fmt.Printf("User %s created successfully with type %s\n", username, userType)
-    },
+            userRepo := db.NewUserRepository(database.DB)
+            err = userRepo.CreateUser(username, password, uType)
+            if err != nil {
+                log.Fatalf("Failed to create user: %v", err)
+            }
+
+            fmt.Printf("User %s created successfully with type %s\n", username, userType)
+        },
+    }
+
+    cmd.Flags().String("username", "", "Username for the new user")
+    cmd.Flags().String("password", "", "Password for the new user")
+    cmd.Flags().String("type", "http", "User type (http or admin)")
+
+    return cmd
 }
 
 func init() {
     rootCmd.AddCommand(interactCmd)
     rootCmd.AddCommand(userCmd)
 
-    // User management command flags
-    createUserCmd.Flags().String("username", "", "Username for the new user")
-    createUserCmd.Flags().String("password", "", "Password for the new user")
-    createUserCmd.Flags().String("type", "http", "User type (http or admin)")
-    userCmd.AddCommand(createUserCmd)
+    // User management command
+    userCmd.AddCommand(createUserCmd())
 }
 
 func main() {
@@ -615,4 +626,45 @@ func printResponse(method string, resp interface{}) {
         return
     }
     fmt.Printf("%s Response:\n%s\n\n", method, string(data))
+}
+
+func createUserInteractive() {
+    var username, password string
+    prompt := &survey.Input{
+        Message: "Enter username:",
+    }
+    survey.AskOne(prompt, &username)
+
+    survey.AskOne(&survey.Password{
+        Message: "Enter password:",
+    }, &password)
+
+    typePrompt := &survey.Select{
+        Message: "Select user type:",
+        Options: []string{"http", "admin"},
+    }
+    var userType string
+    survey.AskOne(typePrompt, &userType)
+
+    // Get database path from environment
+    dbPath := os.Getenv("DB_PATH")
+    if dbPath == "" {
+        dbPath = "./liveops.db" // fallback to default
+    }
+
+    // Initialize database
+    database, err := db.NewDB(dbPath)
+    if err != nil {
+        log.Printf("Failed to initialize database: %v", err)
+        return
+    }
+
+    userRepo := db.NewUserRepository(database.DB)
+    err = userRepo.CreateUser(username, password, db.UserType(userType))
+    if err != nil {
+        log.Printf("Failed to create user: %v", err)
+        return
+    }
+
+    fmt.Printf("User %s created successfully with type %s\n", username, userType)
 }
