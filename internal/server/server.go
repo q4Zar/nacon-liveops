@@ -121,20 +121,18 @@ func (s *Server) Start(addr string) error {
 		r.Get("/events/{id}", breakerWrapper(s.breaker, s.handleGetEventByID))
 	})
 
-	// Create multiplexed handler for HTTP/gRPC
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.ProtoMajor == 2 && r.Header.Get("Content-Type") == "application/grpc" {
-			s.grpcServer.ServeHTTP(w, r)
+	// Create HTTP/2 server with multiplexing
+	h2s := &http2.Server{}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.ProtoMajor == 2 && req.Header.Get("Content-Type") == "application/grpc" {
+			s.grpcServer.ServeHTTP(w, req)
 		} else {
-			r.ServeHTTP(w, r)
+			r.ServeHTTP(w, req)
 		}
 	})
 
-	// Create HTTP/2 server
-	h2s := &http2.Server{}
+	// Create server with h2c handler
 	h2cHandler := h2c.NewHandler(handler, h2s)
-
-	// Create and start server
 	s.httpServer = &http.Server{
 		Addr:         addr,
 		Handler:      h2cHandler,
@@ -253,28 +251,33 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetActiveEvents(w http.ResponseWriter, r *http.Request) {
-	events, err := s.eventSvc.GetActiveEvents(r.Context())
+	ctx := r.Context()
+	events, err := s.eventRepo.GetActiveEvents()
 	if err != nil {
+		s.logger.Error("Failed to get active events", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to get active events: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(events); err != nil {
+		s.logger.Error("Failed to encode response", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		return
 	}
 }
 
 func (s *Server) handleGetEventByID(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	eventID := chi.URLParam(r, "id")
 	if eventID == "" {
 		http.Error(w, "Event ID is required", http.StatusBadRequest)
 		return
 	}
 
-	event, err := s.eventSvc.GetEvent(r.Context(), eventID)
+	event, err := s.eventRepo.GetEvent(eventID)
 	if err != nil {
+		s.logger.Error("Failed to get event", zap.String("id", eventID), zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to get event: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -286,6 +289,7 @@ func (s *Server) handleGetEventByID(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(event); err != nil {
+		s.logger.Error("Failed to encode response", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		return
 	}
