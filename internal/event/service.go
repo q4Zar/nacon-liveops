@@ -12,6 +12,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -27,94 +29,92 @@ func NewService(repo db.EventRepository, logger *zap.Logger) *Service {
 	}
 }
 
-func (s *Service) GetActiveEvents() ([]*api.Event, error) {
+// GetActiveEvents returns all active events
+func (s *Service) GetActiveEvents(ctx context.Context) (*api.ListEventsResponse, error) {
 	s.logger.Debug("Getting active events")
 	events, err := s.repo.GetActiveEvents()
 	if err != nil {
 		s.logger.Error("Failed to get active events", zap.Error(err))
-		return nil, err
+		return nil, status.Error(codes.Internal, "failed to get active events")
 	}
-	return events, nil
+	return &api.ListEventsResponse{Events: events}, nil
 }
 
-func (s *Service) GetEvent(id string) (*api.Event, error) {
+// GetEvent returns a specific event by ID
+func (s *Service) GetEvent(ctx context.Context, id string) (*api.GetEventResponse, error) {
 	s.logger.Debug("Getting event by ID", zap.String("id", id))
 	event, err := s.repo.GetEvent(id)
 	if err != nil {
 		s.logger.Error("Failed to get event", zap.String("id", id), zap.Error(err))
-		return nil, err
+		return nil, status.Error(codes.Internal, "failed to get event")
 	}
-	return event, nil
+	return &api.GetEventResponse{Event: event}, nil
 }
 
-func (s *Service) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.EventResponse, error) {
-	s.logger.Debug("Creating event", zap.String("id", req.Id))
+// CreateEvent creates a new event
+func (s *Service) CreateEvent(ctx context.Context, req *api.CreateEventRequest) (*api.CreateEventResponse, error) {
+	s.logger.Debug("Creating event")
 	event := &api.Event{
-		Id:          req.Id,
-		Title:       req.Title,
-		Description: req.Description,
-		StartTime:   req.StartTime,
-		EndTime:     req.EndTime,
-		Rewards:     req.Rewards,
+		Id:          req.Event.Id,
+		Title:       req.Event.Title,
+		Description: req.Event.Description,
+		StartTime:   req.Event.StartTime,
+		EndTime:     req.Event.EndTime,
+		Rewards:     req.Event.Rewards,
 		CreatedAt:   time.Now().Unix(),
 		UpdatedAt:   time.Now().Unix(),
 	}
 
 	if err := s.repo.CreateEvent(event); err != nil {
-		s.logger.Error("Failed to create event", zap.String("id", req.Id), zap.Error(err))
-		return nil, err
+		s.logger.Error("Failed to create event", zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to create event")
 	}
 
-	return &api.EventResponse{
-		Event: event,
-	}, nil
+	return &api.CreateEventResponse{Event: event}, nil
 }
 
-func (s *Service) UpdateEvent(ctx context.Context, req *api.EventRequest) (*api.EventResponse, error) {
-	s.logger.Debug("Updating event", zap.String("id", req.Id))
+// UpdateEvent updates an existing event
+func (s *Service) UpdateEvent(ctx context.Context, req *api.UpdateEventRequest) (*api.UpdateEventResponse, error) {
+	s.logger.Debug("Updating event", zap.String("id", req.Event.Id))
 	event := &api.Event{
-		Id:          req.Id,
-		Title:       req.Title,
-		Description: req.Description,
-		StartTime:   req.StartTime,
-		EndTime:     req.EndTime,
-		Rewards:     req.Rewards,
+		Id:          req.Event.Id,
+		Title:       req.Event.Title,
+		Description: req.Event.Description,
+		StartTime:   req.Event.StartTime,
+		EndTime:     req.Event.EndTime,
+		Rewards:     req.Event.Rewards,
 		UpdatedAt:   time.Now().Unix(),
 	}
 
 	if err := s.repo.UpdateEvent(event); err != nil {
-		s.logger.Error("Failed to update event", zap.String("id", req.Id), zap.Error(err))
-		return nil, err
+		s.logger.Error("Failed to update event", zap.String("id", req.Event.Id), zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to update event")
 	}
 
-	return &api.EventResponse{
-		Event: event,
-	}, nil
+	return &api.UpdateEventResponse{Event: event}, nil
 }
 
-func (s *Service) DeleteEvent(ctx context.Context, req *api.DeleteRequest) (*api.DeleteResponse, error) {
+// DeleteEvent deletes an event by ID
+func (s *Service) DeleteEvent(ctx context.Context, req *api.DeleteEventRequest) (*api.DeleteEventResponse, error) {
 	s.logger.Debug("Deleting event", zap.String("id", req.Id))
 	if err := s.repo.DeleteEvent(req.Id); err != nil {
 		s.logger.Error("Failed to delete event", zap.String("id", req.Id), zap.Error(err))
-		return nil, err
+		return nil, status.Error(codes.Internal, "failed to delete event")
 	}
 
-	return &api.DeleteResponse{
-		Success: true,
-	}, nil
+	return &api.DeleteEventResponse{Success: true}, nil
 }
 
-func (s *Service) ListEvents(ctx context.Context, req *api.Empty) (*api.ListResponse, error) {
+// ListEvents returns all events
+func (s *Service) ListEvents(ctx context.Context, req *api.ListEventsRequest) (*api.ListEventsResponse, error) {
 	s.logger.Debug("Listing all events")
 	events, err := s.repo.ListEvents()
 	if err != nil {
 		s.logger.Error("Failed to list events", zap.Error(err))
-		return nil, err
+		return nil, status.Error(codes.Internal, "failed to list events")
 	}
 
-	return &api.ListResponse{
-		Events: events,
-	}, nil
+	return &api.ListEventsResponse{Events: events}, nil
 }
 
 func (s *Service) GetActiveEvents(w http.ResponseWriter, r *http.Request) {
