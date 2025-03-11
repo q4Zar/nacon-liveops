@@ -15,7 +15,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
-	"github.com/go-chi/jwtauth/v5"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/sony/gobreaker"
 	"go.uber.org/zap"
@@ -37,6 +36,7 @@ type Server struct {
 	eventSvc   *event.Service
 	breaker    *gobreaker.CircuitBreaker
 	db         *db.DB
+	logger     *zap.Logger
 }
 
 func NewServer(logger *zap.Logger) *Server {
@@ -53,14 +53,7 @@ func NewServer(logger *zap.Logger) *Server {
 	// Initialize services
 	eventSvc := event.NewService(eventRepo, logger)
 
-	// Initialize gRPC server with auth interceptor
-	grpcServer := grpc.NewServer(
-		grpc.UnaryInterceptor(auth.GRPCAuthInterceptor(userRepo)),
-		grpc.MaxConcurrentStreams(100),
-	)
-	api.RegisterLiveOpsServiceServer(grpcServer, eventSvc)
-	reflection.Register(grpcServer)
-
+	// Initialize circuit breaker
 	breaker := gobreaker.NewCircuitBreaker(gobreaker.Settings{
 		Name:        "http-breaker",
 		MaxRequests: 5,
@@ -71,48 +64,91 @@ func NewServer(logger *zap.Logger) *Server {
 		},
 	})
 
-	httpRouter := chi.NewRouter()
-	httpRouter.Use(RateLimit(100, 10))
-	httpRouter.Use(TimeoutMiddleware(5 * time.Second))
+	// Initialize server
+	server := &Server{
+		eventRepo: eventRepo,
+		userRepo:  userRepo,
+		eventSvc:  eventSvc,
+		breaker:   breaker,
+		db:        database,
+		logger:    logger,
+	}
 
-	// Protected routes with authentication
-	httpRouter.Group(func(r chi.Router) {
-		r.Use(auth.HTTPVerifier())
-		r.Use(auth.HTTPAuthenticator())
-		r.Get("/events", breakerWrapper(breaker, eventSvc.GetActiveEvents))
-		r.Get("/events/{id}", breakerWrapper(breaker, eventSvc.GetEvent))
+	// Initialize gRPC server
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(auth.GRPCAuthInterceptor(userRepo)),
+		grpc.MaxConcurrentStreams(100),
+	)
+	api.RegisterLiveOpsServiceServer(grpcServer, server)
+	reflection.Register(grpcServer)
+	server.grpcServer = grpcServer
+
+	return server
+}
+
+func (s *Server) Start(addr string) error {
+	// Initialize JWT
+	auth.InitJWT([]byte("your-secret-key-here"))
+
+	// Create router
+	r := chi.NewRouter()
+
+	// Middleware
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		ExposedHeaders:   []string{"Link"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
+	r.Use(RateLimit(100, 10))
+	r.Use(TimeoutMiddleware(5 * time.Second))
+
+	// Public routes
+	r.Group(func(r chi.Router) {
+		r.Post("/login", s.handleLogin)
+		r.Post("/signup", s.handleSignup)
 	})
 
-	// Single handler to multiplex HTTP and gRPC
+	// Protected routes
+	r.Group(func(r chi.Router) {
+		r.Use(auth.HTTPVerifier())
+		r.Use(auth.HTTPAuthenticator())
+		r.Get("/events", breakerWrapper(s.breaker, s.handleGetActiveEvents))
+		r.Get("/events/{id}", breakerWrapper(s.breaker, s.handleGetEventByID))
+	})
+
+	// Create multiplexed handler for HTTP/gRPC
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ProtoMajor == 2 && r.Header.Get("Content-Type") == "application/grpc" {
-			grpcServer.ServeHTTP(w, r)
+			s.grpcServer.ServeHTTP(w, r)
 		} else {
-			httpRouter.ServeHTTP(w, r)
+			r.ServeHTTP(w, r)
 		}
 	})
 
-	// Wrap with h2c to support HTTP/2 cleartext
+	// Create HTTP/2 server
 	h2s := &http2.Server{}
 	h2cHandler := h2c.NewHandler(handler, h2s)
 
-	return &Server{
-		httpServer: &http.Server{
-			Handler:      h2cHandler,
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
-		},
-		grpcServer: grpcServer,
-		eventRepo:  eventRepo,
-		userRepo:   userRepo,
-		eventSvc:   eventSvc,
-		breaker:    breaker,
-		db:         database,
+	// Create and start server
+	s.httpServer = &http.Server{
+		Addr:         addr,
+		Handler:      h2cHandler,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
 	}
-}
 
-func (s *Server) Serve(l net.Listener) error {
-	return s.httpServer.Serve(l)
+	s.logger.Info("Starting server", zap.String("addr", addr))
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to create listener: %v", err)
+	}
+
+	return s.httpServer.Serve(listener)
 }
 
 func RateLimit(limit float64, burst int) func(next http.Handler) http.Handler {
@@ -152,65 +188,6 @@ func breakerWrapper(cb *gobreaker.CircuitBreaker, handler http.HandlerFunc) http
 			}
 		}
 	}
-}
-
-func (s *Server) Start(httpAddr, grpcAddr string) error {
-	// Initialize JWT with a secret key (in production, use a secure key management system)
-	auth.InitJWT([]byte("your-secret-key-here"))
-
-	// Start HTTP server
-	go func() {
-		if err := s.startHTTP(httpAddr); err != nil {
-			fmt.Printf("HTTP server error: %v\n", err)
-		}
-	}()
-
-	// Start gRPC server
-	return s.startGRPC(grpcAddr)
-}
-
-func (s *Server) startHTTP(addr string) error {
-	r := chi.NewRouter()
-
-	// Middleware
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
-
-	// Public routes
-	r.Group(func(r chi.Router) {
-		r.Post("/login", s.handleLogin)
-		r.Post("/signup", s.handleSignup)
-	})
-
-	// Protected routes
-	r.Group(func(r chi.Router) {
-		r.Use(auth.HTTPVerifier())
-		r.Use(auth.HTTPAuthenticator())
-
-		r.Get("/events", s.handleGetActiveEvents)
-		r.Get("/events/{id}", s.handleGetEventByID)
-	})
-
-	s.httpServer = &http.Server{
-		Addr:    addr,
-		Handler: r,
-	}
-
-	fmt.Printf("HTTP server listening on %s\n", addr)
-	return s.httpServer.ListenAndServe()
-}
-
-func (s *Server) startGRPC(addr string) error {
-	fmt.Printf("gRPC server listening on %s\n", addr)
-	return nil // Return the listener setup and serve code here
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -275,7 +252,44 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ... existing event handler methods ...
+func (s *Server) handleGetActiveEvents(w http.ResponseWriter, r *http.Request) {
+	events, err := s.eventSvc.GetActiveEvents(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get active events: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(events); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleGetEventByID(w http.ResponseWriter, r *http.Request) {
+	eventID := chi.URLParam(r, "id")
+	if eventID == "" {
+		http.Error(w, "Event ID is required", http.StatusBadRequest)
+		return
+	}
+
+	event, err := s.eventSvc.GetEvent(r.Context(), eventID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get event: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if event == nil {
+		http.Error(w, "Event not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(event); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+		return
+	}
+}
 
 // gRPC methods
 func (s *Server) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.EventResponse, error) {
