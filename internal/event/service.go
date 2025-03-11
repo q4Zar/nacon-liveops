@@ -28,6 +28,30 @@ func NewService(repo db.EventRepository, logger *zap.Logger) *Service {
 	}
 }
 
+// Convert db.Event to api.EventResponse
+func toEventResponse(e db.Event) *api.EventResponse {
+	return &api.EventResponse{
+		Id:          e.ID,
+		Title:       e.Title,
+		Description: e.Description,
+		StartTime:   e.StartTime,
+		EndTime:     e.EndTime,
+		Rewards:     e.Rewards,
+	}
+}
+
+// Convert api.EventRequest to db.Event
+func toDBEvent(req *api.EventRequest) db.Event {
+	return db.Event{
+		ID:          req.Id,
+		Title:       req.Title,
+		Description: req.Description,
+		StartTime:   req.StartTime,
+		EndTime:     req.EndTime,
+		Rewards:     req.Rewards,
+	}
+}
+
 // GetActiveEvents returns all active events
 func (s *Service) GetActiveEvents(ctx context.Context) (*api.EventsResponse, error) {
 	s.logger.Debug("Getting active events")
@@ -36,7 +60,12 @@ func (s *Service) GetActiveEvents(ctx context.Context) (*api.EventsResponse, err
 		s.logger.Error("Failed to get active events", zap.Error(err))
 		return nil, status.Error(codes.Internal, "failed to get active events")
 	}
-	return &api.EventsResponse{Events: events}, nil
+
+	apiEvents := make([]*api.EventResponse, len(events))
+	for i, event := range events {
+		apiEvents[i] = toEventResponse(event)
+	}
+	return &api.EventsResponse{Events: apiEvents}, nil
 }
 
 // GetEvent returns a specific event by ID
@@ -47,47 +76,33 @@ func (s *Service) GetEvent(ctx context.Context, id string) (*api.EventResponse, 
 		s.logger.Error("Failed to get event", zap.String("id", id), zap.Error(err))
 		return nil, status.Error(codes.Internal, "failed to get event")
 	}
-	return event, nil
+	return toEventResponse(event), nil
 }
 
 // CreateEvent creates a new event
 func (s *Service) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.EventResponse, error) {
 	s.logger.Debug("Creating event")
-	event := &api.EventResponse{
-		Id:          req.Id,
-		Title:       req.Title,
-		Description: req.Description,
-		StartTime:   req.StartTime,
-		EndTime:     req.EndTime,
-		Rewards:     req.Rewards,
-	}
+	dbEvent := toDBEvent(req)
 
-	if err := s.repo.CreateEvent(event); err != nil {
+	if err := s.repo.CreateEvent(dbEvent); err != nil {
 		s.logger.Error("Failed to create event", zap.Error(err))
 		return nil, status.Error(codes.Internal, "failed to create event")
 	}
 
-	return event, nil
+	return toEventResponse(dbEvent), nil
 }
 
 // UpdateEvent updates an existing event
 func (s *Service) UpdateEvent(ctx context.Context, req *api.EventRequest) (*api.EventResponse, error) {
 	s.logger.Debug("Updating event", zap.String("id", req.Id))
-	event := &api.EventResponse{
-		Id:          req.Id,
-		Title:       req.Title,
-		Description: req.Description,
-		StartTime:   req.StartTime,
-		EndTime:     req.EndTime,
-		Rewards:     req.Rewards,
-	}
+	dbEvent := toDBEvent(req)
 
-	if err := s.repo.UpdateEvent(event); err != nil {
+	if err := s.repo.UpdateEvent(dbEvent); err != nil {
 		s.logger.Error("Failed to update event", zap.String("id", req.Id), zap.Error(err))
 		return nil, status.Error(codes.Internal, "failed to update event")
 	}
 
-	return event, nil
+	return toEventResponse(dbEvent), nil
 }
 
 // DeleteEvent deletes an event by ID
@@ -110,7 +125,11 @@ func (s *Service) ListEvents(ctx context.Context, req *api.Empty) (*api.EventsRe
 		return nil, status.Error(codes.Internal, "failed to list events")
 	}
 
-	return &api.EventsResponse{Events: events}, nil
+	apiEvents := make([]*api.EventResponse, len(events))
+	for i, event := range events {
+		apiEvents[i] = toEventResponse(event)
+	}
+	return &api.EventsResponse{Events: apiEvents}, nil
 }
 
 func (s *Service) GetActiveEvents(w http.ResponseWriter, r *http.Request) {
