@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	crand "crypto/rand"
+	"encoding/json"
 	"fmt"
+	"io"
 	"liveops/api"
 	"log"
 	"math/big"
@@ -37,6 +40,7 @@ var (
     httpClient    = &http.Client{Timeout: 5 * time.Second}
     httpAddr      = getServerURL()      // HTTP server URL
     grpcAddr      = getGRPCServerURL()  // gRPC server URL
+    jwtToken      string                // JWT token for authentication
 )
 
 func getServerURL() string {
@@ -168,6 +172,41 @@ func listEvents(client api.LiveOpsServiceClient) func(context.Context, *opStats)
     }
 }
 
+// signIn performs admin authentication and gets JWT token
+func signIn() error {
+    // Create login request
+    reqBody := map[string]interface{}{
+        "username": "admin",
+        "password": "admin123",
+    }
+    jsonData, err := json.Marshal(reqBody)
+    if err != nil {
+        return fmt.Errorf("failed to marshal request: %v", err)
+    }
+
+    // Send login request
+    resp, err := http.Post(httpAddr+"/login", "application/json", bytes.NewBuffer(jsonData))
+    if err != nil {
+        return fmt.Errorf("login request failed: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("login failed: %s", string(body))
+    }
+
+    var result struct {
+        Token string `json:"token"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+        return fmt.Errorf("failed to decode response: %v", err)
+    }
+
+    jwtToken = result.Token
+    return nil
+}
+
 // fetchActiveEvents makes an HTTP GET /events request
 func fetchActiveEvents() func(context.Context, *opStats) {
     return func(ctx context.Context, stats *opStats) {
@@ -177,7 +216,7 @@ func fetchActiveEvents() func(context.Context, *opStats) {
             atomic.AddUint64(&stats.Failed, 1)
             return
         }
-        req.Header.Set("Authorization", httpAuthKey)
+        req.Header.Set("Authorization", "Bearer "+jwtToken)
 
         resp, err := httpClient.Do(req)
         if err != nil {
@@ -215,7 +254,7 @@ func fetchEventByID() func(context.Context, *opStats) {
             atomic.AddUint64(&stats.Failed, 1)
             return
         }
-        req.Header.Set("Authorization", httpAuthKey)
+        req.Header.Set("Authorization", "Bearer "+jwtToken)
 
         resp, err := httpClient.Do(req)
         if err != nil {
@@ -274,6 +313,13 @@ func getEventCount(client api.LiveOpsServiceClient, ctx context.Context) (int, e
 }
 
 func main() {
+    // Sign in first to get JWT token
+    log.Println("Signing in as admin...")
+    if err := signIn(); err != nil {
+        log.Fatalf("Failed to sign in: %v", err)
+    }
+    log.Println("Successfully signed in")
+
     // Connect to gRPC server
     conn, err := grpc.Dial(
         grpcAddr,
@@ -290,8 +336,8 @@ func main() {
     ctx, cancel := context.WithTimeout(context.Background(), duration)
     defer cancel()
 
-    // Add gRPC authorization header
-    ctx = metadata.AppendToOutgoingContext(ctx, "authorization", grpcAuthKey)
+    // Add JWT token to context
+    ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+jwtToken)
 
     // Operations to run during the test (excluding DeleteEvent)
     operations := []struct {
@@ -347,7 +393,7 @@ func main() {
     // Get final event count
     finalCtx, finalCancel := context.WithTimeout(context.Background(), 5*time.Second)
     defer finalCancel()
-    finalCtx = metadata.AppendToOutgoingContext(finalCtx, "authorization", grpcAuthKey)
+    finalCtx = metadata.AppendToOutgoingContext(finalCtx, "authorization", "Bearer "+jwtToken)
     eventCount, err := getEventCount(grpcClient, finalCtx)
     if err != nil {
         log.Printf("Error fetching final event count: %v", err)
