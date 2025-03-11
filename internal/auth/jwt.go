@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/jwtauth/v5"
+	"github.com/lestrrat-go/jwx/v2/jwt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
@@ -49,7 +50,24 @@ func HTTPVerifier() func(http.Handler) http.Handler {
 
 // Authenticator middleware for HTTP requests
 func HTTPAuthenticator() func(http.Handler) http.Handler {
-	return jwtauth.Authenticator
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token, claims, err := jwtauth.FromContext(r.Context())
+
+			if err != nil || token == nil {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			if err := jwt.Validate(token); err != nil {
+				http.Error(w, "Unauthorized - Invalid token", http.StatusUnauthorized)
+				return
+			}
+
+			// Token is valid, continue
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), "jwt_claims", claims)))
+		})
+	}
 }
 
 // GRPCAuthInterceptor creates an interceptor for gRPC authentication
@@ -71,11 +89,15 @@ func GRPCAuthInterceptor(userRepo db.UserRepository) grpc.UnaryServerInterceptor
 			return nil, fmt.Errorf("invalid token: %v", err)
 		}
 
-		if token == nil || !token.Valid() {
+		if err := jwt.Validate(token); err != nil {
 			return nil, errors.New("invalid token")
 		}
 
-		claims := token.PrivateClaims()
+		claims, err := token.AsMap(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get claims: %v", err)
+		}
+
 		userType, ok := claims["user_type"].(string)
 		if !ok || userType != string(db.UserTypeAdmin) {
 			return nil, errors.New("unauthorized: admin access required")
@@ -92,7 +114,11 @@ func ExtractUserFromContext(ctx context.Context) (*db.User, error) {
 		return nil, fmt.Errorf("failed to get token from context: %v", err)
 	}
 
-	if token == nil || !token.Valid() {
+	if token == nil {
+		return nil, errors.New("no token found in context")
+	}
+
+	if err := jwt.Validate(token); err != nil {
 		return nil, errors.New("invalid token")
 	}
 
