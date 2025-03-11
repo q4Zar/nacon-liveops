@@ -177,7 +177,7 @@ func signIn() error {
     // Create login request
     reqBody := map[string]interface{}{
         "username": "admin",
-        "password": "admin123",
+        "password": "admin",
     }
     jsonData, err := json.Marshal(reqBody)
     if err != nil {
