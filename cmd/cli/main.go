@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"liveops/api"
 	"liveops/internal/db"
 	"log"
@@ -34,7 +36,7 @@ const (
 type Credentials struct {
     Username string    `json:"username"`
     UserType db.UserType `json:"user_type"`
-    Token    string    `json:"token"` // base64 encoded username:password
+    Token    string    `json:"token"` // JWT token
 }
 
 var (
@@ -223,28 +225,41 @@ func signUp() error {
 
     fmt.Printf("Creating user with username: %s, type: %s\n", username, userType)
 
-    // Create the user
-    database, err := db.NewDB("./liveops.db")
+    // Create signup request
+    reqBody := map[string]interface{}{
+        "username":  username,
+        "password":  password,
+        "user_type": userType,
+    }
+    jsonData, err := json.Marshal(reqBody)
     if err != nil {
-        fmt.Printf("Database connection error: %v\n", err)
-        return fmt.Errorf("failed to initialize database: %v", err)
+        return fmt.Errorf("failed to marshal request: %v", err)
     }
 
-    userRepo := db.NewUserRepository(database.DB)
-    err = userRepo.CreateUser(username, password, db.UserType(userType))
+    // Send signup request
+    resp, err := http.Post(serverURL+"/signup", "application/json", bytes.NewBuffer(jsonData))
     if err != nil {
-        fmt.Printf("User creation error: %v\n", err)
-        return fmt.Errorf("failed to create user: %v", err)
+        return fmt.Errorf("signup request failed: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("signup failed: %s", string(body))
     }
 
-    fmt.Printf("User created successfully in database\n")
+    var result struct {
+        Token string `json:"token"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+        return fmt.Errorf("failed to decode response: %v", err)
+    }
 
     // Store credentials
-    token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
     credentials = &Credentials{
         Username: username,
         UserType: db.UserType(userType),
-        Token:    token,
+        Token:    result.Token,
     }
 
     if err := saveCredentials(credentials); err != nil {
@@ -267,24 +282,39 @@ func signIn() error {
         Message: "Enter password:",
     }, &password)
 
-    // Validate credentials
-    database, err := db.NewDB("./liveops.db")
+    // Create login request
+    reqBody := map[string]interface{}{
+        "username": username,
+        "password": password,
+    }
+    jsonData, err := json.Marshal(reqBody)
     if err != nil {
-        return fmt.Errorf("failed to initialize database: %v", err)
+        return fmt.Errorf("failed to marshal request: %v", err)
     }
 
-    userRepo := db.NewUserRepository(database.DB)
-    user, err := userRepo.ValidateUser(username, password)
+    // Send login request
+    resp, err := http.Post(serverURL+"/login", "application/json", bytes.NewBuffer(jsonData))
     if err != nil {
-        return fmt.Errorf("invalid credentials: %v", err)
+        return fmt.Errorf("login request failed: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("login failed: %s", string(body))
+    }
+
+    var result struct {
+        Token string `json:"token"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+        return fmt.Errorf("failed to decode response: %v", err)
     }
 
     // Store credentials
-    token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
     credentials = &Credentials{
         Username: username,
-        UserType: user.Type,
-        Token:    token,
+        Token:    result.Token,
     }
     return saveCredentials(credentials)
 }
@@ -309,10 +339,9 @@ func runInteractive() {
     defer conn.Close()
     grpcClient := api.NewLiveOpsServiceClient(conn)
 
-    // Context with auth - add "Basic " prefix
-    authToken := "Basic " + credentials.Token
-    fmt.Printf("Using authorization token: %s\n", authToken)
-    ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", authToken)
+    // Context with JWT token
+    fmt.Printf("Using JWT token for authorization\n")
+    ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+credentials.Token)
 
     // Main interaction loop
     for {
@@ -448,7 +477,7 @@ func fetchActiveEvents() {
         log.Printf("Failed to create request: %v", err)
         return
     }
-    req.Header.Set("Authorization", "Basic "+credentials.Token)
+    req.Header.Set("Authorization", "Bearer "+credentials.Token)
 
     resp, err := httpClient.Do(req)
     if err != nil {
@@ -482,7 +511,7 @@ func fetchEventByID() {
         log.Printf("Failed to create request: %v", err)
         return
     }
-    req.Header.Set("Authorization", "Basic "+credentials.Token)
+    req.Header.Set("Authorization", "Bearer "+credentials.Token)
 
     resp, err := httpClient.Do(req)
     if err != nil {
