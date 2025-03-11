@@ -304,8 +304,32 @@ func (s *Server) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.E
 		return nil, status.Error(codes.PermissionDenied, "admin access required")
 	}
 
-	// ... rest of the create event logic ...
-	return &api.EventResponse{}, nil
+	event := db.Event{
+		ID:           req.Id,
+		Title:        req.Title,
+		Description:  req.Description,
+		StartTimeUnix: req.StartTime,
+		EndTimeUnix:   req.EndTime,
+		Rewards:      req.Rewards,
+		CreatedAt:    time.Now().Unix(),
+		UpdatedAt:    time.Now().Unix(),
+	}
+
+	if err := s.eventRepo.CreateEvent(event); err != nil {
+		s.logger.Error("Failed to create event", zap.Error(err))
+		return nil, status.Errorf(codes.Internal, "failed to create event: %v", err)
+	}
+
+	return &api.EventResponse{
+		Id:          event.ID,
+		Title:       event.Title,
+		Description: event.Description,
+		StartTime:   event.StartTimeUnix,
+		EndTime:     event.EndTimeUnix,
+		Rewards:     event.Rewards,
+		CreatedAt:   event.CreatedAt,
+		UpdatedAt:   event.UpdatedAt,
+	}, nil
 }
 
 // ListEvents returns a list of all events
@@ -342,6 +366,85 @@ func (s *Server) ListEvents(ctx context.Context, req *api.Empty) (*api.EventsRes
 	return &api.EventsResponse{
 		Events: protoEvents,
 	}, nil
+}
+
+// UpdateEvent updates an existing event
+func (s *Server) UpdateEvent(ctx context.Context, req *api.EventRequest) (*api.EventResponse, error) {
+	user, err := auth.ExtractUserFromContext(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "invalid authentication: %v", err)
+	}
+
+	if user.Type != db.UserTypeAdmin {
+		return nil, status.Error(codes.PermissionDenied, "admin access required")
+	}
+
+	// Check if event exists
+	existingEvent, err := s.eventRepo.GetEvent(req.Id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, status.Errorf(codes.NotFound, "event not found: %s", req.Id)
+		}
+		s.logger.Error("Failed to get event", zap.Error(err))
+		return nil, status.Errorf(codes.Internal, "failed to get event: %v", err)
+	}
+
+	// Update event fields
+	event := db.Event{
+		ID:           req.Id,
+		Title:        req.Title,
+		Description:  req.Description,
+		StartTimeUnix: req.StartTime,
+		EndTimeUnix:   req.EndTime,
+		Rewards:      req.Rewards,
+		CreatedAt:    existingEvent.CreatedAt,
+		UpdatedAt:    time.Now().Unix(),
+	}
+
+	if err := s.eventRepo.UpdateEvent(event); err != nil {
+		s.logger.Error("Failed to update event", zap.Error(err))
+		return nil, status.Errorf(codes.Internal, "failed to update event: %v", err)
+	}
+
+	return &api.EventResponse{
+		Id:          event.ID,
+		Title:       event.Title,
+		Description: event.Description,
+		StartTime:   event.StartTimeUnix,
+		EndTime:     event.EndTimeUnix,
+		Rewards:     event.Rewards,
+		CreatedAt:   event.CreatedAt,
+		UpdatedAt:   event.UpdatedAt,
+	}, nil
+}
+
+// DeleteEvent deletes an existing event
+func (s *Server) DeleteEvent(ctx context.Context, req *api.DeleteRequest) (*api.Empty, error) {
+	user, err := auth.ExtractUserFromContext(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "invalid authentication: %v", err)
+	}
+
+	if user.Type != db.UserTypeAdmin {
+		return nil, status.Error(codes.PermissionDenied, "admin access required")
+	}
+
+	// Check if event exists
+	_, err = s.eventRepo.GetEvent(req.Id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, status.Errorf(codes.NotFound, "event not found: %s", req.Id)
+		}
+		s.logger.Error("Failed to get event", zap.Error(err))
+		return nil, status.Errorf(codes.Internal, "failed to get event: %v", err)
+	}
+
+	if err := s.eventRepo.DeleteEvent(req.Id); err != nil {
+		s.logger.Error("Failed to delete event", zap.Error(err))
+		return nil, status.Errorf(codes.Internal, "failed to delete event: %v", err)
+	}
+
+	return &api.Empty{}, nil
 }
 
 // ... other gRPC methods with similar authentication checks ...
