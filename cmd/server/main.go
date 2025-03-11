@@ -17,20 +17,14 @@ func main() {
     host := "localhost"
     port := "8080"
     url := "http://" + host + ":" + port
-    listener, err := net.Listen("tcp", ":"+port)
-    if err != nil {
-        logger.Fatal("Failed to start listener",
-            zap.String("host", host),
-            zap.String("port", port),
-            zap.Error(err))
-    }
+    addr := ":" + port
 
     logger.Info("Application started",
         zap.String("host", host),
         zap.String("url", url))
 
     srv := server.NewServer(logger)
-    if err := srv.Serve(listener); err != nil {
+    if err := srv.Start(addr); err != nil {
         logger.Fatal("Server failed",
             zap.String("host", host),
             zap.String("url", url),
