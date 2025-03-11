@@ -1,11 +1,9 @@
 package db
 
 import (
-	"log"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -17,6 +15,8 @@ type Event struct {
 	EndTime     *timestamppb.Timestamp `gorm:"-"`
 	StartTimeUnix int64 `gorm:"column:start_time"`
 	EndTimeUnix   int64 `gorm:"column:end_time"`
+	CreatedAt   int64 `gorm:"autoCreateTime"`
+	UpdatedAt   int64 `gorm:"autoUpdateTime"`
 	Rewards     string
 }
 
@@ -33,21 +33,12 @@ type eventRepository struct {
 	db *gorm.DB
 }
 
-func NewEventRepository(dbPath string) EventRepository {
-	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
-	if err != nil {
-		log.Fatalf("failed to connect database: %v", err)
+func NewEventRepository(db *gorm.DB) EventRepository {
+	// Auto migrate the schema
+	if err := db.AutoMigrate(&Event{}); err != nil {
+		panic(err)
 	}
-
-	// Auto Migrate the schema
-	err = db.AutoMigrate(&Event{})
-	if err != nil {
-		log.Fatalf("failed to migrate database: %v", err)
-	}
-
-	return &eventRepository{
-		db: db,
-	}
+	return &eventRepository{db: db}
 }
 
 func (r *eventRepository) GetActiveEvents() ([]Event, error) {
@@ -83,12 +74,15 @@ func (r *eventRepository) GetEvent(id string) (Event, error) {
 func (r *eventRepository) CreateEvent(e Event) error {
 	e.StartTimeUnix = e.StartTime.AsTime().Unix()
 	e.EndTimeUnix = e.EndTime.AsTime().Unix()
+	e.CreatedAt = time.Now().Unix()
+	e.UpdatedAt = time.Now().Unix()
 	return r.db.Create(&e).Error
 }
 
 func (r *eventRepository) UpdateEvent(e Event) error {
 	e.StartTimeUnix = e.StartTime.AsTime().Unix()
 	e.EndTimeUnix = e.EndTime.AsTime().Unix()
+	e.UpdatedAt = time.Now().Unix()
 	return r.db.Save(&e).Error
 }
 

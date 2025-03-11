@@ -20,7 +20,7 @@ go test -v ./internal/event
 # stress client
 docker compose up --build stressclient
 # cli interactive
-docker compose run --rm -it cli
+docker compose run --rm -it --build cli   
 ```
 
 ## TODO : Optimisations

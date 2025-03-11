@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"liveops/api" // Your proto-generated package
+	"io"
+	"liveops/api"
+	"liveops/internal/db"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -28,10 +32,17 @@ const (
     httpAuthKey          = "public-key-123"       // HTTP auth
 )
 
+type Credentials struct {
+    Username string    `json:"username"`
+    UserType db.UserType `json:"user_type"`
+    Token    string    `json:"token"` // JWT token
+}
+
 var (
     serverURL     = getEnv("SERVER_URL", defaultServerURL)
     grpcServerURL = getEnv("GRPC_SERVER_URL", defaultGRPCServerURL)
     httpClient    = &http.Client{Timeout: 5 * time.Second}
+    credentials   *Credentials
 )
 
 // getEnv retrieves an environment variable or returns a default value
@@ -58,8 +69,57 @@ var interactCmd = &cobra.Command{
     },
 }
 
+// userCmd represents the user management command
+var userCmd = &cobra.Command{
+    Use:   "user",
+    Short: "User management commands",
+    Long:  `Commands for managing users in the system.`,
+}
+
+// createUserCmd creates a new user
+var createUserCmd = &cobra.Command{
+    Use:   "create",
+    Short: "Create a new user",
+    Run: func(cmd *cobra.Command, args []string) {
+        username, _ := cmd.Flags().GetString("username")
+        password, _ := cmd.Flags().GetString("password")
+        userType, _ := cmd.Flags().GetString("type")
+
+        if username == "" || password == "" {
+            log.Fatal("Username and password are required")
+        }
+
+        // Validate user type
+        uType := db.UserType(userType)
+        if uType != db.UserTypeHTTP && uType != db.UserTypeAdmin {
+            log.Fatal("Invalid user type. Must be 'http' or 'admin'")
+        }
+
+        // Initialize database
+        database, err := db.NewDB("./liveops.db")
+        if err != nil {
+            log.Fatalf("Failed to initialize database: %v", err)
+        }
+
+        userRepo := db.NewUserRepository(database.DB)
+        err = userRepo.CreateUser(username, password, uType)
+        if err != nil {
+            log.Fatalf("Failed to create user: %v", err)
+        }
+
+        fmt.Printf("User %s created successfully with type %s\n", username, userType)
+    },
+}
+
 func init() {
     rootCmd.AddCommand(interactCmd)
+    rootCmd.AddCommand(userCmd)
+
+    // User management command flags
+    createUserCmd.Flags().String("username", "", "Username for the new user")
+    createUserCmd.Flags().String("password", "", "Password for the new user")
+    createUserCmd.Flags().String("type", "http", "User type (http or admin)")
+    userCmd.AddCommand(createUserCmd)
 }
 
 func main() {
@@ -68,8 +128,205 @@ func main() {
     }
 }
 
+// getCredentialsPath returns the path to the credentials file
+func getCredentialsPath() string {
+    homeDir, err := os.UserHomeDir()
+    if err != nil {
+        log.Fatal("Could not determine home directory")
+    }
+    return filepath.Join(homeDir, ".liveops-credentials")
+}
+
+// loadCredentials loads stored credentials if they exist
+func loadCredentials() *Credentials {
+    path := getCredentialsPath()
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return nil
+    }
+
+    var creds Credentials
+    if err := json.Unmarshal(data, &creds); err != nil {
+        return nil
+    }
+    return &creds
+}
+
+// saveCredentials saves credentials to disk
+func saveCredentials(creds *Credentials) error {
+    path := getCredentialsPath()
+    fmt.Printf("Saving credentials to: %s\n", path)
+    
+    data, err := json.Marshal(creds)
+    if err != nil {
+        return fmt.Errorf("failed to marshal credentials: %v", err)
+    }
+
+    if err := os.WriteFile(path, data, 0600); err != nil {
+        return fmt.Errorf("failed to write credentials file: %v", err)
+    }
+
+    return nil
+}
+
+// authenticate handles user authentication
+func authenticate() error {
+    // Check if we already have credentials
+    if creds := loadCredentials(); creds != nil {
+        credentials = creds
+        return nil
+    }
+
+    // Ask whether to sign up or sign in
+    var action string
+    prompt := &survey.Select{
+        Message: "Choose action:",
+        Options: []string{"sign-in", "sign-up", "exit"},
+    }
+    survey.AskOne(prompt, &action)
+
+    switch action {
+    case "sign-up":
+        return signUp()
+    case "sign-in":
+        return signIn()
+    default:
+        os.Exit(0)
+        return nil
+    }
+}
+
+func signUp() error {
+    fmt.Println("Starting signup process...")
+    var username, password string
+    survey.AskOne(&survey.Input{
+        Message: "Enter username:",
+    }, &username)
+
+    if username == "" {
+        return fmt.Errorf("username cannot be empty")
+    }
+
+    survey.AskOne(&survey.Password{
+        Message: "Enter password:",
+    }, &password)
+
+    if password == "" {
+        return fmt.Errorf("password cannot be empty")
+    }
+
+    typePrompt := &survey.Select{
+        Message: "Select user type:",
+        Options: []string{"http", "admin"},
+    }
+    var userType string
+    survey.AskOne(typePrompt, &userType)
+
+    fmt.Printf("Creating user with username: %s, type: %s\n", username, userType)
+
+    // Create signup request
+    reqBody := map[string]interface{}{
+        "username":  username,
+        "password":  password,
+        "user_type": userType,
+    }
+    jsonData, err := json.Marshal(reqBody)
+    if err != nil {
+        return fmt.Errorf("failed to marshal request: %v", err)
+    }
+
+    // Send signup request
+    resp, err := http.Post(serverURL+"/signup", "application/json", bytes.NewBuffer(jsonData))
+    if err != nil {
+        return fmt.Errorf("signup request failed: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("signup failed: %s", string(body))
+    }
+
+    var result struct {
+        Token string `json:"token"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+        return fmt.Errorf("failed to decode response: %v", err)
+    }
+
+    // Store credentials
+    credentials = &Credentials{
+        Username: username,
+        UserType: db.UserType(userType),
+        Token:    result.Token,
+    }
+
+    if err := saveCredentials(credentials); err != nil {
+        fmt.Printf("Warning: Failed to save credentials locally: %v\n", err)
+    } else {
+        fmt.Printf("Credentials saved successfully\n")
+    }
+
+    fmt.Printf("Signup completed successfully. You are now logged in as %s (%s)\n", username, userType)
+    return nil
+}
+
+func signIn() error {
+    var username, password string
+    survey.AskOne(&survey.Input{
+        Message: "Enter username:",
+    }, &username)
+
+    survey.AskOne(&survey.Password{
+        Message: "Enter password:",
+    }, &password)
+
+    // Create login request
+    reqBody := map[string]interface{}{
+        "username": username,
+        "password": password,
+    }
+    jsonData, err := json.Marshal(reqBody)
+    if err != nil {
+        return fmt.Errorf("failed to marshal request: %v", err)
+    }
+
+    // Send login request
+    resp, err := http.Post(serverURL+"/login", "application/json", bytes.NewBuffer(jsonData))
+    if err != nil {
+        return fmt.Errorf("login request failed: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("login failed: %s", string(body))
+    }
+
+    var result struct {
+        Token string `json:"token"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+        return fmt.Errorf("failed to decode response: %v", err)
+    }
+
+    // Store credentials
+    credentials = &Credentials{
+        Username: username,
+        Token:    result.Token,
+    }
+    return saveCredentials(credentials)
+}
+
 // runInteractive handles the interactive CLI flow
 func runInteractive() {
+    // First authenticate
+    if err := authenticate(); err != nil {
+        log.Fatalf("Authentication failed: %v", err)
+    }
+
+    fmt.Printf("Authenticated as %s (type: %s)\n", credentials.Username, credentials.UserType)
+
     // Connect to gRPC server
     conn, err := grpc.Dial(
         grpcServerURL,
@@ -81,8 +338,9 @@ func runInteractive() {
     defer conn.Close()
     grpcClient := api.NewLiveOpsServiceClient(conn)
 
-    // Context with auth
-    ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", grpcAuthKey)
+    // Context with JWT token
+    fmt.Printf("Using JWT token for authorization\n")
+    ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+credentials.Token)
 
     // Main interaction loop
     for {
@@ -90,6 +348,13 @@ func runInteractive() {
         if action == "exit" {
             fmt.Println("Exiting...")
             return
+        }
+
+        // Check user permissions
+        if credentials.UserType == db.UserTypeHTTP && 
+           (action == "create" || action == "update" || action == "delete" || action == "list") {
+            fmt.Println("Error: HTTP users cannot use gRPC endpoints")
+            continue
         }
 
         switch action {
@@ -208,7 +473,7 @@ func fetchActiveEvents() {
         log.Printf("Failed to create request: %v", err)
         return
     }
-    req.Header.Set("Authorization", httpAuthKey)
+    req.Header.Set("Authorization", "Bearer "+credentials.Token)
 
     resp, err := httpClient.Do(req)
     if err != nil {
@@ -242,7 +507,7 @@ func fetchEventByID() {
         log.Printf("Failed to create request: %v", err)
         return
     }
-    req.Header.Set("Authorization", httpAuthKey)
+    req.Header.Set("Authorization", "Bearer "+credentials.Token)
 
     resp, err := httpClient.Do(req)
     if err != nil {
