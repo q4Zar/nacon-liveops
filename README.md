@@ -18,5 +18,7 @@ A Golang backend using Chi for RESTful HTTP APIs and gRPC for internal operation
   - signup (admin / admin-key-456)
   - interact with available functions
 - make test (unit test)
-- make stress-test 
+- make stress-test (absolutely needs admin / admin-key-456 created ... could have been done with seed file ikik)
 ```
+
+thanks for using ;)
