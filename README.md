@@ -23,6 +23,17 @@ make cli
 make stress-test
 ```
 
+## Scenario
+```sh
+- cp .env.example .env
+- make serverd (daemon) | make serve
+- make cli 
+  - signup (admin / admin-key-456)
+  - interact with available functions
+- make test (unit test)
+- make stress-test 
+```
+
 ## TODO : Optimisations
 
 ```
@@ -31,7 +42,7 @@ make stress-test
 - [X] tweak rate-limit from env
 - [X] build protobuf in docker
 - [X] env variables from docker compose to *.go
-- [] stress client load from env
+- [] strategic-stress-test client load from env
   - 1 min
     - x 5 sec
       - create 100 event
