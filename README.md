@@ -23,6 +23,16 @@ make cli
 make stress-test
 ```
 
+## Scenario
+```sh
+- make serverd (daemon) | make serve
+- make cli 
+  - signup (admin / admin-key-456)
+  - interact with available functions
+- make test (unit test)
+- make stress-test 
+```
+
 ## TODO : Optimisations
 
 ```
