@@ -48,9 +48,6 @@ services:
       # Admin credentials
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin-key-456}
-      # Delete operation configuration
-      - DELETE_TIMEOUT=${DELETE_TIMEOUT:-10s}
-      - DELETE_RETRIES=${DELETE_RETRIES:-3}
   cli:
     build:
       context: .

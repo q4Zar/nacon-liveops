@@ -33,7 +33,7 @@ const (
 	defaultRequestDelay    = 5 * time.Millisecond // Throttle requests
 	defaultUsername        = "admin"              // Default admin username
 	defaultPassword        = "admin-key-456"      // Default admin password
-	defaultDeleteTimeout   = 10 * time.Second     // Default timeout for delete operations
+	defaultDeleteTimeout   = 5 * time.Millisecond // Default timeout for delete operations
 	defaultDeleteRetries   = 3                    // Default number of retries for delete operations
 )
 
@@ -497,7 +497,7 @@ func main() {
 	// Perform deletions equal to successful creations
 	createSuccess := operations[0].stats.Success // CreateEvent is index 0
 	log.Printf("Cleaning up: Deleting %d events (equal to successful creations)...", createSuccess)
-	deleteEvents(ctx, grpcClient, &deleteStats, createSuccess)
+	// deleteEvents(ctx, grpcClient, &deleteStats, createSuccess)
 
 	// Get final event count
 	finalCtx, finalCancel := context.WithTimeout(context.Background(), 5*time.Second)
