@@ -13,14 +13,14 @@ A Golang backend using Chi for RESTful HTTP APIs and gRPC for internal operation
 ## Running
 
 ```sh
-# server as daemon
-docker compose up --build -d go-nacon
-# event unit test
-go test -v ./internal/event
-# stress client
-docker compose up --build stressclient
+# launch server
+make server
 # cli interactive
-docker compose run --rm -it --build cli   
+make cli
+# event unit test
+# go test -v ./internal/event
+# stress client
+make stress-test
 ```
 
 ## TODO : Optimisations

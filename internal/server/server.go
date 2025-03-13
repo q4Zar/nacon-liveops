@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -28,6 +30,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Server struct {
@@ -257,8 +260,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Username string    `json:"username"`
-		Password string    `json:"password"`
+		Username string      `json:"username"`
+		Password string      `json:"password"`
 		UserType db.UserType `json:"user_type"`
 	}
 
@@ -290,6 +293,12 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetActiveEvents(w http.ResponseWriter, r *http.Request) {
+	// Check if client has disconnected
+	if r.Context().Err() != nil {
+		s.logger.Debug("Client disconnected before processing request")
+		return
+	}
+
 	events, err := s.eventRepo.GetActiveEvents()
 	if err != nil {
 		s.logger.Error("Failed to get active events", zap.Error(err))
@@ -298,10 +307,28 @@ func (s *Server) handleGetActiveEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(events); err != nil {
+
+	// Use a buffered writer to handle large responses
+	buf := &bytes.Buffer{}
+	if err := json.NewEncoder(buf).Encode(events); err != nil {
 		s.logger.Error("Failed to encode response", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	// Check if client is still connected before writing
+	if r.Context().Err() != nil {
+		s.logger.Debug("Client disconnected before sending response")
+		return
+	}
+
+	// Write the response
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		if strings.Contains(err.Error(), "broken pipe") {
+			s.logger.Debug("Client disconnected while sending response")
+		} else {
+			s.logger.Error("Failed to write response", zap.Error(err))
+		}
 	}
 }
 
@@ -342,15 +369,18 @@ func (s *Server) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.E
 		return nil, status.Error(codes.PermissionDenied, "admin access required")
 	}
 
+	now := time.Now()
 	event := db.Event{
-		ID:           req.Id,
-		Title:        req.Title,
-		Description:  req.Description,
+		ID:            req.Id,
+		Title:         req.Title,
+		Description:   req.Description,
+		StartTime:     timestamppb.New(time.Unix(req.StartTime, 0)),
+		EndTime:       timestamppb.New(time.Unix(req.EndTime, 0)),
 		StartTimeUnix: req.StartTime,
 		EndTimeUnix:   req.EndTime,
-		Rewards:      req.Rewards,
-		CreatedAt:    time.Now().Unix(),
-		UpdatedAt:    time.Now().Unix(),
+		Rewards:       req.Rewards,
+		CreatedAt:     now.Unix(),
+		UpdatedAt:     now.Unix(),
 	}
 
 	if err := s.eventRepo.CreateEvent(event); err != nil {
@@ -429,14 +459,14 @@ func (s *Server) UpdateEvent(ctx context.Context, req *api.EventRequest) (*api.E
 
 	// Update event fields
 	event := db.Event{
-		ID:           req.Id,
-		Title:        req.Title,
-		Description:  req.Description,
+		ID:            req.Id,
+		Title:         req.Title,
+		Description:   req.Description,
 		StartTimeUnix: req.StartTime,
 		EndTimeUnix:   req.EndTime,
-		Rewards:      req.Rewards,
-		CreatedAt:    existingEvent.CreatedAt,
-		UpdatedAt:    time.Now().Unix(),
+		Rewards:       req.Rewards,
+		CreatedAt:     existingEvent.CreatedAt,
+		UpdatedAt:     time.Now().Unix(),
 	}
 
 	if err := s.eventRepo.UpdateEvent(event); err != nil {
@@ -484,5 +514,3 @@ func (s *Server) DeleteEvent(ctx context.Context, req *api.DeleteRequest) (*api.
 
 	return &api.Empty{}, nil
 }
-
-// ... other gRPC methods with similar authentication checks ...
