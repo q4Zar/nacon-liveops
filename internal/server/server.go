@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"liveops/api"
 	"liveops/internal/auth"
+	"liveops/internal/cache"
 	"liveops/internal/db"
 	"liveops/internal/event"
+	"liveops/internal/logger"
 	"net"
 	"net/http"
 	"os"
@@ -16,14 +18,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/sony/gobreaker"
 	"go.uber.org/zap"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
@@ -39,20 +36,27 @@ type Server struct {
 	eventSvc   *event.Service
 	breaker    *gobreaker.CircuitBreaker
 	db         *db.DB
-	logger     *zap.Logger
+	cache      cache.Cache
+	logger     *logger.Logger
 }
 
-func NewServer(logger *zap.Logger) *Server {
-	// Get environment variables
-	dbPath := os.Getenv("DB_PATH")
-	if dbPath == "" {
-		dbPath = "./liveops.db" // fallback to default
-	}
+func NewServer() (*Server, error) {
+	logger := logger.NewLogger()
 
 	// Initialize database
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = "./data/liveops.db"
+	}
 	database, err := db.NewDB(dbPath)
 	if err != nil {
-		logger.Fatal("failed to initialize database", zap.Error(err))
+		return nil, fmt.Errorf("failed to initialize database: %v", err)
+	}
+
+	// Initialize Redis cache
+	redisCache, err := cache.NewRedisCache()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Redis cache: %v", err)
 	}
 
 	// Initialize repositories
@@ -60,7 +64,7 @@ func NewServer(logger *zap.Logger) *Server {
 	userRepo := db.NewUserRepository(database.DB)
 
 	// Initialize services
-	eventSvc := event.NewService(eventRepo, logger)
+	eventSvc := event.NewService(eventRepo, redisCache, logger.Logger)
 
 	// Get circuit breaker configuration from environment
 	cbMaxRequests := getEnvInt("CB_MAX_REQUESTS", 5)
@@ -79,26 +83,35 @@ func NewServer(logger *zap.Logger) *Server {
 		},
 	})
 
-	// Initialize server
-	server := &Server{
+	// Create gRPC server
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(auth.GRPCAuthInterceptor(userRepo)),
+		grpc.MaxConcurrentStreams(100),
+	)
+	api.RegisterLiveOpsServiceServer(grpcServer, &Server{
 		eventRepo: eventRepo,
 		userRepo:  userRepo,
 		eventSvc:  eventSvc,
 		breaker:   breaker,
 		db:        database,
+		cache:     redisCache,
 		logger:    logger,
+	})
+	reflection.Register(grpcServer)
+
+	// Create server instance
+	server := &Server{
+		grpcServer: grpcServer,
+		eventRepo:  eventRepo,
+		userRepo:   userRepo,
+		eventSvc:   eventSvc,
+		breaker:    breaker,
+		db:         database,
+		cache:      redisCache,
+		logger:     logger,
 	}
 
-	// Initialize gRPC server
-	grpcServer := grpc.NewServer(
-		grpc.UnaryInterceptor(auth.GRPCAuthInterceptor(userRepo)),
-		grpc.MaxConcurrentStreams(100),
-	)
-	api.RegisterLiveOpsServiceServer(grpcServer, server)
-	reflection.Register(grpcServer)
-	server.grpcServer = grpcServer
-
-	return server
+	return server, nil
 }
 
 // getEnvInt retrieves an environment variable as integer or returns a default value
@@ -114,117 +127,69 @@ func getEnvInt(key string, defaultValue int) int {
 	return intValue
 }
 
-func (s *Server) Start(addr string) error {
-	// Get JWT secret from environment
-	jwtSecret := os.Getenv("JWT_SECRET_KEY")
-	if jwtSecret == "" {
-		s.logger.Warn("JWT_SECRET_KEY not set, using default (not recommended for production)")
-		jwtSecret = "your-secret-key-here"
+func (s *Server) Start() error {
+	// Start HTTP server
+	httpPort := os.Getenv("HTTP_PORT")
+	if httpPort == "" {
+		httpPort = "8080"
 	}
 
-	// Initialize JWT
-	auth.InitJWT([]byte(jwtSecret))
-
-	// Create router
+	// Create HTTP router
 	r := chi.NewRouter()
+	r.Use(auth.HTTPVerifier())
+	r.Use(auth.HTTPAuthenticator())
 
-	// Get rate limiter configuration from environment
-	rateLimit := float64(getEnvInt("RATE_LIMIT", 100))
-	rateBurst := getEnvInt("RATE_BURST", 10)
+	// Register HTTP routes
+	r.Post("/login", s.handleLogin)
+	r.Post("/signup", s.handleSignup)
+	r.Get("/events", s.handleGetActiveEvents)
+	r.Get("/events/{id}", s.handleGetEventByID)
 
-	// Middleware
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
-	r.Use(RateLimit(rateLimit, rateBurst))
-	r.Use(TimeoutMiddleware(5 * time.Second))
-
-	// Public routes
-	r.Group(func(r chi.Router) {
-		r.Post("/login", s.handleLogin)
-		r.Post("/signup", s.handleSignup)
-	})
-
-	// Protected routes
-	r.Group(func(r chi.Router) {
-		r.Use(auth.HTTPVerifier())
-		r.Use(auth.HTTPAuthenticator())
-		r.Get("/events", breakerWrapper(s.breaker, s.handleGetActiveEvents))
-		r.Get("/events/{id}", breakerWrapper(s.breaker, s.handleGetEventByID))
-	})
-
-	// Create HTTP/2 server with multiplexing
-	h2s := &http2.Server{}
-	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.ProtoMajor == 2 && req.Header.Get("Content-Type") == "application/grpc" {
-			s.grpcServer.ServeHTTP(w, req)
-		} else {
-			r.ServeHTTP(w, req)
-		}
-	})
-
-	// Create server with h2c handler
-	h2cHandler := h2c.NewHandler(handler, h2s)
+	// Create HTTP server
 	s.httpServer = &http.Server{
-		Addr:         addr,
-		Handler:      h2cHandler,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		Addr:    fmt.Sprintf(":%s", httpPort),
+		Handler: r,
 	}
 
-	s.logger.Info("Starting server", zap.String("addr", addr))
-	listener, err := net.Listen("tcp", addr)
+	// Start HTTP server in a goroutine
+	go func() {
+		s.logger.Info("Starting HTTP server", zap.String("port", httpPort))
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			s.logger.Error("HTTP server failed", zap.Error(err))
+		}
+	}()
+
+	// Start gRPC server
+	grpcPort := os.Getenv("GRPC_PORT")
+	if grpcPort == "" {
+		grpcPort = "8081" // Use a different port for gRPC
+	}
+
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", grpcPort))
 	if err != nil {
-		return fmt.Errorf("failed to create listener: %v", err)
+		return fmt.Errorf("failed to listen: %v", err)
 	}
 
-	return s.httpServer.Serve(listener)
-}
-
-func RateLimit(limit float64, burst int) func(next http.Handler) http.Handler {
-	limiter := rate.NewLimiter(rate.Limit(limit), burst)
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !limiter.Allow() {
-				http.Error(w, `{"error": "rate limit exceeded"}`, http.StatusTooManyRequests)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
+	s.logger.Info("Starting gRPC server", zap.String("port", grpcPort))
+	if err := s.grpcServer.Serve(lis); err != nil {
+		return fmt.Errorf("failed to serve: %v", err)
 	}
+
+	return nil
 }
 
-func TimeoutMiddleware(timeout time.Duration) func(next http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx, cancel := context.WithTimeout(r.Context(), timeout)
-			defer cancel()
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
+func (s *Server) Stop() {
+	if s.httpServer != nil {
+		s.httpServer.Close()
 	}
-}
-
-func breakerWrapper(cb *gobreaker.CircuitBreaker, handler http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		_, err := cb.Execute(func() (interface{}, error) {
-			handler(w, r)
-			return nil, nil
-		})
-		if err != nil {
-			if err == gobreaker.ErrOpenState {
-				http.Error(w, `{"error": "service unavailable"}`, http.StatusServiceUnavailable)
-			} else {
-				http.Error(w, `{"error": "internal server error"}`, http.StatusInternalServerError)
-			}
+	s.grpcServer.GracefulStop()
+	if s.db != nil {
+		sqlDB, err := s.db.DB.DB()
+		if err == nil {
+			sqlDB.Close()
 		}
 	}
+	s.cache.Close()
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -257,8 +222,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Username string    `json:"username"`
-		Password string    `json:"password"`
+		Username string      `json:"username"`
+		Password string      `json:"password"`
 		UserType db.UserType `json:"user_type"`
 	}
 
@@ -343,14 +308,14 @@ func (s *Server) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.E
 	}
 
 	event := db.Event{
-		ID:           req.Id,
-		Title:        req.Title,
-		Description:  req.Description,
+		ID:            req.Id,
+		Title:         req.Title,
+		Description:   req.Description,
 		StartTimeUnix: req.StartTime,
 		EndTimeUnix:   req.EndTime,
-		Rewards:      req.Rewards,
-		CreatedAt:    time.Now().Unix(),
-		UpdatedAt:    time.Now().Unix(),
+		Rewards:       req.Rewards,
+		CreatedAt:     time.Now().Unix(),
+		UpdatedAt:     time.Now().Unix(),
 	}
 
 	if err := s.eventRepo.CreateEvent(event); err != nil {
@@ -429,14 +394,14 @@ func (s *Server) UpdateEvent(ctx context.Context, req *api.EventRequest) (*api.E
 
 	// Update event fields
 	event := db.Event{
-		ID:           req.Id,
-		Title:        req.Title,
-		Description:  req.Description,
+		ID:            req.Id,
+		Title:         req.Title,
+		Description:   req.Description,
 		StartTimeUnix: req.StartTime,
 		EndTimeUnix:   req.EndTime,
-		Rewards:      req.Rewards,
-		CreatedAt:    existingEvent.CreatedAt,
-		UpdatedAt:    time.Now().Unix(),
+		Rewards:       req.Rewards,
+		CreatedAt:     existingEvent.CreatedAt,
+		UpdatedAt:     time.Now().Unix(),
 	}
 
 	if err := s.eventRepo.UpdateEvent(event); err != nil {

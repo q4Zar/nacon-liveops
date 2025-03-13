@@ -1,32 +1,35 @@
 package main
 
 import (
+	"liveops/internal/logger"
 	"liveops/internal/server"
 
 	"go.uber.org/zap"
 )
 
 func main() {
-    logger, err := zap.NewProduction()
-    if err != nil {
-        panic("failed to initialize logger: " + err.Error())
-    }
-    defer logger.Sync()
+	logger := logger.NewLogger()
 
-    host := "localhost"
-    port := "8080"
-    url := "http://" + host + ":" + port
-    addr := ":" + port
+	host := "localhost"
+	port := "8080"
+	url := "http://" + host + ":" + port
 
-    logger.Info("Application started",
-        zap.String("host", host),
-        zap.String("url", url))
+	logger.Info("Application started",
+		zap.String("host", host),
+		zap.String("url", url))
 
-    srv := server.NewServer(logger)
-    if err := srv.Start(addr); err != nil {
-        logger.Fatal("Server failed",
-            zap.String("host", host),
-            zap.String("url", url),
-            zap.Error(err))
-    }
+	srv, err := server.NewServer()
+	if err != nil {
+		logger.Fatal("Failed to create server",
+			zap.String("host", host),
+			zap.String("url", url),
+			zap.Error(err))
+	}
+
+	if err := srv.Start(); err != nil {
+		logger.Fatal("Server failed",
+			zap.String("host", host),
+			zap.String("url", url),
+			zap.Error(err))
+	}
 }
