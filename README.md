@@ -26,20 +26,12 @@ docker compose run --rm -it --build cli
 ## TODO : Optimisations
 
 ```
-- use GORM
-
-- JWT not hardcoded
-
-- tweak rate-limit from env
-
-- build protobuf in docker
-  
-- env variables from docker compose to *.go
-- unit
-  - auth
-  - event
-
-- stress
+- [X] use GORM 
+- [X] JWT not hardcoded use library
+- [X] tweak rate-limit from env
+- [X] build protobuf in docker
+- [X] env variables from docker compose to *.go
+- [] stress client load from env
   - 1 min
     - x 5 sec
       - create 100 event
@@ -47,6 +39,5 @@ docker compose run --rm -it --build cli
       - get 1000 events
       - update 20
     - delete all
-
-- caching system if event not updated serve cache
+- [] caching system if event not updated serve cache
 ```

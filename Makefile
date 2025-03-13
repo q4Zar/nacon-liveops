@@ -3,8 +3,9 @@
 # Default target when just running 'make'
 .DEFAULT_GOAL := help
 
-# Start the server in detached mode
-server: ## Start the server in detached mode
+server: ## Start the server 
+	docker compose up --build go-nacon
+serverd: ## Start the server in detached mode
 	docker compose up --build -d go-nacon
 
 # Run all tests
