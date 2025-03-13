@@ -1,5 +1,7 @@
-version: "3.8"
+# version: "3.8"
+
 services:
+
   go-nacon:
     build:
       context: .
@@ -10,6 +12,7 @@ services:
     volumes:
       - .:/go/src/github.com/nacon
       - ./.db-data:/data
+
     environment:
       - GO111MODULE=on
       - GOPROXY=https://goproxy.io
@@ -28,6 +31,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
   stressclient:
     build:
       context: .
@@ -48,6 +52,7 @@ services:
       # Admin credentials
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin-key-456}
+
   cli:
     build:
       context: .
@@ -63,6 +68,7 @@ services:
       - DB_PATH=${DB_PATH}
     tty: true
     stdin_open: true
+
   test:
     build:
       context: .

@@ -20,6 +20,11 @@ test-event: ## Run event service tests
 stress-test: ## Run stress tests
 	docker compose up --build stressclient
 
+# Run stress tests
+strategic-test: ## Run stress tests
+	docker compose up --build strategicclient
+
+
 # Run CLI in interactive mode
 cli: ## Run CLI in interactive mode
 	docker compose run --rm -it --build cli
