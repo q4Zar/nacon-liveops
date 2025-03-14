@@ -4,9 +4,9 @@
 .DEFAULT_GOAL := help
 
 server: ## Start the server 
-	docker compose up --build go-nacon
+	docker compose up --build go-nacon redis
 serverd: ## Start the server in detached mode
-	docker compose up --build -d go-nacon
+	docker compose up --build -d go-nacon redis
 
 # Run all tests
 test: ## Run all tests
@@ -15,6 +15,7 @@ test: ## Run all tests
 # Run event service tests specifically
 test-event: ## Run event service tests
 	go test -v ./internal/event
+	go test -v ./internal/db
 
 # Run stress tests
 stress-test: ## Run stress tests

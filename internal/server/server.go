@@ -1,20 +1,19 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"liveops/api"
 	"liveops/internal/auth"
+	"liveops/internal/cache"
 	"liveops/internal/db"
 	"liveops/internal/event"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -43,6 +42,7 @@ type Server struct {
 	breaker    *gobreaker.CircuitBreaker
 	db         *db.DB
 	logger     *zap.Logger
+	cache      *cache.RedisCache
 }
 
 func NewServer(logger *zap.Logger) *Server {
@@ -82,6 +82,12 @@ func NewServer(logger *zap.Logger) *Server {
 		},
 	})
 
+	// Initialize cache
+	cache, err := cache.NewRedisCache()
+	if err != nil {
+		logger.Fatal("failed to initialize cache", zap.Error(err))
+	}
+
 	// Initialize server
 	server := &Server{
 		eventRepo: eventRepo,
@@ -90,6 +96,7 @@ func NewServer(logger *zap.Logger) *Server {
 		breaker:   breaker,
 		db:        database,
 		logger:    logger,
+		cache:     cache,
 	}
 
 	// Initialize gRPC server
@@ -299,36 +306,38 @@ func (s *Server) handleGetActiveEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	events, err := s.eventRepo.GetActiveEvents()
+	// Try to get from cache first
+	events, err := s.cache.GetActiveEvents(r.Context())
+	if err == nil {
+		s.logger.Info("Retrieved active events from cache")
+		// Successfully got from cache, return directly
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(events); err != nil {
+			s.logger.Error("Failed to encode response", zap.Error(err))
+			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	s.logger.Info("Cache miss for active events, fetching from database")
+	// Not in cache, get from database
+	events, err = s.eventRepo.GetActiveEvents()
 	if err != nil {
 		s.logger.Error("Failed to get active events", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to get active events: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	// Cache the result
+	if err := s.cache.SetActiveEvents(r.Context(), events); err != nil {
+		s.logger.Error("Failed to cache active events", zap.Error(err))
+	}
 
-	// Use a buffered writer to handle large responses
-	buf := &bytes.Buffer{}
-	if err := json.NewEncoder(buf).Encode(events); err != nil {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(events); err != nil {
 		s.logger.Error("Failed to encode response", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		return
-	}
-
-	// Check if client is still connected before writing
-	if r.Context().Err() != nil {
-		s.logger.Debug("Client disconnected before sending response")
-		return
-	}
-
-	// Write the response
-	if _, err := w.Write(buf.Bytes()); err != nil {
-		if strings.Contains(err.Error(), "broken pipe") {
-			s.logger.Debug("Client disconnected while sending response")
-		} else {
-			s.logger.Error("Failed to write response", zap.Error(err))
-		}
 	}
 }
 
@@ -339,7 +348,22 @@ func (s *Server) handleGetEventByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	event, err := s.eventRepo.GetEvent(eventID)
+	// Try to get from cache first
+	event, err := s.cache.GetEvent(r.Context(), eventID)
+	if err == nil {
+		s.logger.Info("Retrieved event from cache", zap.String("event_id", eventID))
+		// Successfully got from cache, return directly
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(event); err != nil {
+			s.logger.Error("Failed to encode response", zap.Error(err))
+			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	s.logger.Info("Cache miss for event, fetching from database", zap.String("event_id", eventID))
+	// Not in cache, get from database
+	dbEvent, err := s.eventRepo.GetEvent(eventID)
 	if err == sql.ErrNoRows {
 		http.Error(w, "Event not found", http.StatusNotFound)
 		return
@@ -348,6 +372,12 @@ func (s *Server) handleGetEventByID(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Failed to get event", zap.String("id", eventID), zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to get event: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	// Store in cache
+	event = &dbEvent
+	if err := s.cache.SetEvent(r.Context(), event); err != nil {
+		s.logger.Error("Failed to cache event", zap.Error(err))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -388,6 +418,16 @@ func (s *Server) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.E
 		return nil, status.Errorf(codes.Internal, "failed to create event: %v", err)
 	}
 
+	// Cache the new event
+	if err := s.cache.SetEvent(ctx, &event); err != nil {
+		s.logger.Error("Failed to cache event", zap.Error(err))
+	}
+
+	// Invalidate active events cache
+	if err := s.cache.Delete(ctx, "active_events"); err != nil {
+		s.logger.Error("Failed to invalidate active events cache", zap.Error(err))
+	}
+
 	return &api.EventResponse{
 		Id:          event.ID,
 		Title:       event.Title,
@@ -401,39 +441,29 @@ func (s *Server) CreateEvent(ctx context.Context, req *api.EventRequest) (*api.E
 }
 
 // ListEvents returns a list of all events
-func (s *Server) ListEvents(ctx context.Context, req *api.Empty) (*api.EventsResponse, error) {
-	user, err := auth.ExtractUserFromContext(ctx)
+func (s *Server) ListEvents(ctx context.Context, _ *api.Empty) (*api.EventsResponse, error) {
+	var events []db.Event
+	var err error
+
+	// Try to get from cache first
+	events, err = s.cache.GetActiveEvents(ctx)
+	if err == nil {
+		return eventsToResponse(events), nil
+	}
+
+	// If not in cache, get from database
+	events, err = s.eventRepo.GetActiveEvents()
 	if err != nil {
-		return nil, status.Errorf(codes.Unauthenticated, "invalid authentication: %v", err)
+		s.logger.Error("Failed to list events", zap.Error(err))
+		return nil, status.Errorf(codes.Internal, "failed to list events: %v", err)
 	}
 
-	if user.Type != db.UserTypeAdmin {
-		return nil, status.Error(codes.PermissionDenied, "admin access required")
+	// Cache the result
+	if err := s.cache.SetActiveEvents(ctx, events); err != nil {
+		s.logger.Error("Failed to cache active events", zap.Error(err))
 	}
 
-	events, err := s.eventRepo.ListEvents()
-	if err != nil {
-		s.logger.Error("Failed to get events", zap.Error(err))
-		return nil, status.Errorf(codes.Internal, "failed to get events: %v", err)
-	}
-
-	var protoEvents []*api.EventResponse
-	for _, event := range events {
-		protoEvents = append(protoEvents, &api.EventResponse{
-			Id:          event.ID,
-			Title:       event.Title,
-			Description: event.Description,
-			StartTime:   event.StartTimeUnix,
-			EndTime:     event.EndTimeUnix,
-			Rewards:     event.Rewards,
-			CreatedAt:   event.CreatedAt,
-			UpdatedAt:   event.UpdatedAt,
-		})
-	}
-
-	return &api.EventsResponse{
-		Events: protoEvents,
-	}, nil
+	return eventsToResponse(events), nil
 }
 
 // UpdateEvent updates an existing event
@@ -474,6 +504,16 @@ func (s *Server) UpdateEvent(ctx context.Context, req *api.EventRequest) (*api.E
 		return nil, status.Errorf(codes.Internal, "failed to update event: %v", err)
 	}
 
+	// Update cache
+	if err := s.cache.SetEvent(ctx, &event); err != nil {
+		s.logger.Error("Failed to update event cache", zap.Error(err))
+	}
+
+	// Invalidate active events cache
+	if err := s.cache.Delete(ctx, "active_events"); err != nil {
+		s.logger.Error("Failed to invalidate active events cache", zap.Error(err))
+	}
+
 	return &api.EventResponse{
 		Id:          event.ID,
 		Title:       event.Title,
@@ -512,5 +552,38 @@ func (s *Server) DeleteEvent(ctx context.Context, req *api.DeleteRequest) (*api.
 		return nil, status.Errorf(codes.Internal, "failed to delete event: %v", err)
 	}
 
+	// Delete from cache
+	if err := s.cache.DeleteEvent(ctx, req.Id); err != nil {
+		s.logger.Error("Failed to delete event from cache", zap.Error(err))
+	}
+
+	// Invalidate active events cache
+	if err := s.cache.Delete(ctx, "active_events"); err != nil {
+		s.logger.Error("Failed to invalidate active events cache", zap.Error(err))
+	}
+
 	return &api.Empty{}, nil
+}
+
+func eventsToResponse(events []db.Event) *api.EventsResponse {
+	resp := &api.EventsResponse{
+		Events: make([]*api.EventResponse, len(events)),
+	}
+	for i, event := range events {
+		resp.Events[i] = &api.EventResponse{
+			Id:          event.ID,
+			Title:       event.Title,
+			Description: event.Description,
+			StartTime:   event.StartTimeUnix,
+			EndTime:     event.EndTimeUnix,
+			Rewards:     event.Rewards,
+			CreatedAt:   event.CreatedAt,
+			UpdatedAt:   event.UpdatedAt,
+		}
+	}
+	return resp
+}
+
+func (s *Server) Close() error {
+	return s.cache.Close()
 }

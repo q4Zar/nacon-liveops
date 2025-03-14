@@ -10,14 +10,13 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - .:/go/src/github.com/nacon
-      - ./.db-data:/data
-
+      - ./data:/data
     environment:
       - GO111MODULE=on
       - GOPROXY=https://goproxy.io
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - DB_PATH=${DB_PATH}
+      - REDIS_URL=redis:6379
       # Rate Limiter
       - RATE_LIMIT=${RATE_LIMIT}
       - RATE_BURST=${RATE_BURST}
@@ -31,6 +30,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    depends_on:
+      - redis
 
   stressclient:
     build:
@@ -61,7 +62,7 @@ services:
     depends_on:
       - go-nacon
     volumes:
-      - ./.db-data:/data
+      - ./data:/data
     environment:
       - SERVER_URL=${HTTP_SERVER_URL}
       - GRPC_SERVER_URL=${GRPC_SERVER_URL}
@@ -92,5 +93,13 @@ services:
       - CB_TIMEOUT=${CB_TIMEOUT}
       - CB_CONSECUTIVE_FAILURES=${CB_CONSECUTIVE_FAILURES}
 
-# volumes:
-#   db-data:
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+volumes:
+  redis_data:
