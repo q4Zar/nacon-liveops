@@ -1,0 +1,23 @@
+FROM golang:1.23
+
+# Install protoc compiler
+RUN apt-get update && apt-get install -y protobuf-compiler
+
+# Install protoc-gen-go and protoc-gen-go-grpc with specific versions
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.31.0
+RUN go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0
+
+# Add Go bin to PATH
+ENV PATH="$PATH:$(go env GOPATH)/bin"
+
+# Set working directory
+WORKDIR /app
+
+# Copy proto files
+COPY api/liveops.proto /app/api/
+
+# Create output directory
+RUN mkdir -p /app/api
+
+# Set the command to compile proto files
+CMD ["protoc", "--go_out=.", "--go_opt=paths=source_relative", "--go-grpc_out=.", "--go-grpc_opt=paths=source_relative", "api/liveops.proto"] 

@@ -4,8 +4,10 @@
 .DEFAULT_GOAL := help
 
 server: ## Start the server 
+	sh compile-proto.sh
 	docker compose up --build go-nacon redis
 serverd: ## Start the server in detached mode
+	sh compile-proto.sh
 	docker compose up --build -d go-nacon redis
 
 # Run all tests
