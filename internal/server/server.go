@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -61,6 +62,18 @@ func NewServer(logger *zap.Logger) *Server {
 	// Initialize repositories
 	eventRepo := db.NewEventRepository(database.DB)
 	userRepo := db.NewUserRepository(database.DB)
+
+	// Create default users if they don't exist
+	if err := userRepo.CreateUser("public", "public-key-123", db.UserTypeHTTP); err != nil {
+		if !strings.Contains(err.Error(), "already exists") {
+			logger.Error("Failed to create default public user", zap.Error(err))
+		}
+	}
+	if err := userRepo.CreateUser("admin", "admin-key-456", db.UserTypeAdmin); err != nil {
+		if !strings.Contains(err.Error(), "already exists") {
+			logger.Error("Failed to create default admin user", zap.Error(err))
+		}
+	}
 
 	// Initialize services
 	eventSvc := event.NewService(eventRepo, logger)
@@ -527,7 +540,7 @@ func (s *Server) UpdateEvent(ctx context.Context, req *api.EventRequest) (*api.E
 }
 
 // DeleteEvent deletes an existing event
-func (s *Server) DeleteEvent(ctx context.Context, req *api.DeleteRequest) (*api.Empty, error) {
+func (s *Server) DeleteEvent(ctx context.Context, req *api.DeleteRequest) (*api.DeleteResponse, error) {
 	user, err := auth.ExtractUserFromContext(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "invalid authentication: %v", err)
@@ -562,7 +575,10 @@ func (s *Server) DeleteEvent(ctx context.Context, req *api.DeleteRequest) (*api.
 		s.logger.Error("Failed to invalidate active events cache", zap.Error(err))
 	}
 
-	return &api.Empty{}, nil
+	return &api.DeleteResponse{
+		Id:      req.Id,
+		Message: "Event deleted successfully",
+	}, nil
 }
 
 func eventsToResponse(events []db.Event) *api.EventsResponse {

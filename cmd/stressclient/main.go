@@ -497,7 +497,7 @@ func main() {
 	// Perform deletions equal to successful creations
 	createSuccess := operations[0].stats.Success // CreateEvent is index 0
 	log.Printf("Cleaning up: Deleting %d events (equal to successful creations)...", createSuccess)
-	// deleteEvents(ctx, grpcClient, &deleteStats, createSuccess)
+	deleteEvents(ctx, grpcClient, &deleteStats, createSuccess)
 
 	// Get final event count
 	finalCtx, finalCancel := context.WithTimeout(context.Background(), 5*time.Second)
