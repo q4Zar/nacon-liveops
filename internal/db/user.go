@@ -38,12 +38,6 @@ type userRepository struct {
 
 func NewUserRepository(db *gorm.DB) UserRepository {
 	log.Println("Initializing user repository...")
-	// Auto migrate the user table
-	if err := db.AutoMigrate(&User{}); err != nil {
-		log.Printf("Failed to auto-migrate user table: %v", err)
-		panic(err)
-	}
-	log.Println("User table migration completed successfully")
 	return &userRepository{db: db}
 }
 
@@ -123,4 +117,4 @@ func (r *userRepository) GetUser(username string) (*User, error) {
 
 	log.Printf("User %s found", username)
 	return &user, nil
-} 
+}

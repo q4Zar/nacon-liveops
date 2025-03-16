@@ -8,16 +8,16 @@ import (
 )
 
 type Event struct {
-	ID          string `gorm:"primaryKey"`
-	Title       string
-	Description string
-	StartTime   *timestamppb.Timestamp `gorm:"-"`
-	EndTime     *timestamppb.Timestamp `gorm:"-"`
-	StartTimeUnix int64 `gorm:"column:start_time"`
-	EndTimeUnix   int64 `gorm:"column:end_time"`
-	CreatedAt   int64 `gorm:"autoCreateTime"`
-	UpdatedAt   int64 `gorm:"autoUpdateTime"`
-	Rewards     string
+	ID            string `gorm:"primaryKey"`
+	Title         string
+	Description   string
+	StartTime     *timestamppb.Timestamp `gorm:"-"`
+	EndTime       *timestamppb.Timestamp `gorm:"-"`
+	StartTimeUnix int64                  `gorm:"column:start_time"`
+	EndTimeUnix   int64                  `gorm:"column:end_time"`
+	CreatedAt     int64                  `gorm:"autoCreateTime"`
+	UpdatedAt     int64                  `gorm:"autoUpdateTime"`
+	Rewards       string
 }
 
 type EventRepository interface {
@@ -34,17 +34,13 @@ type eventRepository struct {
 }
 
 func NewEventRepository(db *gorm.DB) EventRepository {
-	// Auto migrate the schema
-	if err := db.AutoMigrate(&Event{}); err != nil {
-		panic(err)
-	}
 	return &eventRepository{db: db}
 }
 
 func (r *eventRepository) GetActiveEvents() ([]Event, error) {
 	var events []Event
 	now := time.Now().Unix()
-	
+
 	err := r.db.Where("start_time <= ? AND end_time >= ?", now, now).Find(&events).Error
 	if err != nil {
 		return nil, err

@@ -12,9 +12,9 @@ A Golang backend using Chi for RESTful HTTP APIs and gRPC for internal operation
 ## Scenario
 ```sh
 - cp .env.example .env
-- make serverd (daemon) | make serve
+- make serve (see logs) | make serverd (daemon + make logs)
 - make test (unit test)
-- make stress-test (use admin / admin-key-456 by default)
+- make stress (use admin / admin-key-456 by default)
 - make cli 
   - signup | signin
   - interact with available functions

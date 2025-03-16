@@ -16,9 +16,14 @@ func NewDB(dbPath string) (*DB, error) {
 		return nil, err
 	}
 
+	// Run migrations
+	if err := MigrateDB(db); err != nil {
+		return nil, err
+	}
+
 	return &DB{DB: db}, nil
 }
 
 func GenerateID() string {
 	return uuid.New().String()
-} 
+}
