@@ -10,7 +10,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./data:/data
+      - gorm_data:/data
     environment:
       - GO111MODULE=on
       - GOPROXY=https://goproxy.io
@@ -62,7 +62,7 @@ services:
     depends_on:
       - go-nacon
     volumes:
-      - ./data:/data
+      - gorm_data:/data
     environment:
       - SERVER_URL=${HTTP_SERVER_URL}
       - GRPC_SERVER_URL=${GRPC_SERVER_URL}
@@ -102,4 +102,5 @@ services:
     command: redis-server --appendonly yes
 
 volumes:
+  gorm_data:
   redis_data:

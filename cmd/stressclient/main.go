@@ -11,15 +11,18 @@ import (
 	"log"
 	"math/big"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -27,20 +30,31 @@ import (
 )
 
 const (
-	defaultDuration        = 60 * time.Second     // 1 minute stress test
-	defaultGRPCConcurrency = 10                   // Workers for gRPC operations
-	defaultHTTPConcurrency = 2                    // Workers for HTTP operations
-	defaultRequestDelay    = 5 * time.Millisecond // Throttle requests
-	defaultUsername        = "admin"              // Default admin username
-	defaultPassword        = "admin-key-456"      // Default admin password
-	defaultDeleteTimeout   = 5 * time.Millisecond // Default timeout for delete operations
-	defaultDeleteRetries   = 3                    // Default number of retries for delete operations
+	defaultDuration        = 60 * time.Second       // 1 minute stress test
+	defaultGRPCConcurrency = 10                     // Workers for gRPC operations
+	defaultHTTPConcurrency = 2                      // Workers for HTTP operations
+	defaultRequestDelay    = 5 * time.Millisecond   // Throttle requests
+	defaultUsername        = "admin"                // Default admin username
+	defaultPassword        = "admin-key-456"        // Default admin password
+	defaultDeleteTimeout   = 500 * time.Millisecond // Default timeout for delete operations
+	defaultDeleteRetries   = 0                      // Default number of retries for delete operations
+	defaultHTTPTimeout     = 5 * time.Second        // Default HTTP client timeout
+	defaultMaxIdleConns    = 100                    // Default max idle connections
+	defaultIdleConnTimeout = 90 * time.Second       // Default idle connection timeout
 )
 
 var (
-	eventIDs        []string   // Store successfully created event IDs
-	eventIDsMutex   sync.Mutex // Protect access to eventIDs
-	httpClient      = &http.Client{Timeout: 5 * time.Second}
+	eventIDs      []string   // Store successfully created event IDs
+	eventIDsMutex sync.Mutex // Protect access to eventIDs
+	httpClient    = &http.Client{
+		Timeout: getHTTPTimeout(),
+		Transport: &http.Transport{
+			MaxIdleConns:        getMaxIdleConns(),
+			IdleConnTimeout:     getIdleConnTimeout(),
+			DisableCompression:  true,
+			MaxIdleConnsPerHost: getMaxIdleConns(),
+		},
+	}
 	httpAddr        = getServerURL()     // HTTP server URL
 	grpcAddr        = getGRPCServerURL() // gRPC server URL
 	jwtToken        string               // JWT token for authentication
@@ -136,6 +150,33 @@ func getDeleteRetries() int {
 	return defaultDeleteRetries
 }
 
+func getHTTPTimeout() time.Duration {
+	if timeout := os.Getenv("HTTP_TIMEOUT"); timeout != "" {
+		if t, err := time.ParseDuration(timeout); err == nil {
+			return t
+		}
+	}
+	return defaultHTTPTimeout
+}
+
+func getMaxIdleConns() int {
+	if conns := os.Getenv("MAX_IDLE_CONNS"); conns != "" {
+		if c, err := strconv.Atoi(conns); err == nil && c > 0 {
+			return c
+		}
+	}
+	return defaultMaxIdleConns
+}
+
+func getIdleConnTimeout() time.Duration {
+	if timeout := os.Getenv("IDLE_CONN_TIMEOUT"); timeout != "" {
+		if t, err := time.ParseDuration(timeout); err == nil {
+			return t
+		}
+	}
+	return defaultIdleConnTimeout
+}
+
 func init() {
 	rand.Seed(time.Now().UnixNano())
 	duration = getDuration()
@@ -149,9 +190,39 @@ func init() {
 }
 
 type opStats struct {
-	Success     uint64
-	Failed      uint64
-	RateLimited uint64
+	Success      uint64
+	Failed       uint64
+	RateLimited  uint64
+	TotalLatency time.Duration // Total latency for successful requests
+	MaxLatency   time.Duration // Maximum latency observed
+	MinLatency   time.Duration // Minimum latency observed
+	Count        uint64        // Number of latency measurements
+}
+
+// recordLatency safely records latency metrics
+func (s *opStats) recordLatency(d time.Duration) {
+	atomic.AddUint64(&s.Count, 1)
+	atomic.AddInt64((*int64)(&s.TotalLatency), int64(d))
+
+	for {
+		current := atomic.LoadInt64((*int64)(&s.MaxLatency))
+		if d <= time.Duration(current) {
+			break
+		}
+		if atomic.CompareAndSwapInt64((*int64)(&s.MaxLatency), current, int64(d)) {
+			break
+		}
+	}
+
+	for {
+		current := atomic.LoadInt64((*int64)(&s.MinLatency))
+		if current != 0 && d >= time.Duration(current) {
+			break
+		}
+		if atomic.CompareAndSwapInt64((*int64)(&s.MinLatency), current, int64(d)) {
+			break
+		}
+	}
 }
 
 // randomString generates a random string of given length
@@ -172,7 +243,11 @@ func stressOperation(ctx context.Context, name string, fn func(context.Context, 
 		case <-ctx.Done():
 			return
 		default:
+			start := time.Now()
 			fn(ctx, stats)
+			if stats.Count > 0 { // Only record latency for successful operations
+				stats.recordLatency(time.Since(start))
+			}
 			time.Sleep(requestDelay)
 		}
 	}
@@ -294,6 +369,69 @@ func signIn() error {
 	return nil
 }
 
+// retryableHTTPRequest performs an HTTP request with retries
+func retryableHTTPRequest(ctx context.Context, req *http.Request, maxRetries int) (*http.Response, error) {
+	var lastErr error
+	for retry := 0; retry <= maxRetries; retry++ {
+		if retry > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(retry) * time.Second):
+				// Exponential backoff
+			}
+		}
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			if isRetryableError(err) {
+				lastErr = err
+				continue
+			}
+			return nil, err
+		}
+
+		// Check if the status code is retryable
+		if resp.StatusCode >= 500 && resp.StatusCode != http.StatusTooManyRequests {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("server error: %d", resp.StatusCode)
+			continue
+		}
+
+		return resp, nil
+	}
+	return nil, fmt.Errorf("max retries reached: %v", lastErr)
+}
+
+// isRetryableError determines if an error should trigger a retry
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for network errors
+	if netErr, ok := err.(net.Error); ok {
+		return netErr.Temporary() || netErr.Timeout()
+	}
+
+	// Check for specific error strings
+	errStr := err.Error()
+	retryableErrors := []string{
+		"connection reset by peer",
+		"broken pipe",
+		"connection refused",
+		"no such host",
+	}
+
+	for _, rerr := range retryableErrors {
+		if strings.Contains(errStr, rerr) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // fetchActiveEvents makes an HTTP GET /events request
 func fetchActiveEvents() func(context.Context, *opStats) {
 	return func(ctx context.Context, stats *opStats) {
@@ -305,20 +443,26 @@ func fetchActiveEvents() func(context.Context, *opStats) {
 		}
 		req.Header.Set("Authorization", "Bearer "+jwtToken)
 
-		resp, err := httpClient.Do(req)
+		resp, err := retryableHTTPRequest(ctx, req, 3)
 		if err != nil {
-			log.Printf("Failed to fetch active events: %v", err)
+			if ctx.Err() != nil {
+				// Context cancelled or deadline exceeded
+				return
+			}
+			log.Printf("Failed to fetch active events after retries: %v", err)
 			atomic.AddUint64(&stats.Failed, 1)
 			return
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusTooManyRequests {
+
+		switch resp.StatusCode {
+		case http.StatusOK:
+			atomic.AddUint64(&stats.Success, 1)
+		case http.StatusTooManyRequests:
 			atomic.AddUint64(&stats.RateLimited, 1)
-		} else if resp.StatusCode != http.StatusOK {
+		default:
 			log.Printf("GET /events failed with status %d", resp.StatusCode)
 			atomic.AddUint64(&stats.Failed, 1)
-		} else {
-			atomic.AddUint64(&stats.Success, 1)
 		}
 	}
 }
@@ -429,10 +573,29 @@ func main() {
 	}
 	log.Println("Successfully signed in")
 
-	// Connect to gRPC server
+	// Configure gRPC connection with retry and backoff
 	conn, err := grpc.Dial(
 		grpcAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  100 * time.Millisecond,
+				Multiplier: 1.6,
+				Jitter:     0.2,
+				MaxDelay:   3 * time.Second,
+			},
+			MinConnectTimeout: 5 * time.Second,
+		}),
+		grpc.WithDefaultServiceConfig(`{
+			"loadBalancingPolicy": "round_robin",
+			"retryPolicy": {
+				"MaxAttempts": 4,
+				"InitialBackoff": "0.1s",
+				"MaxBackoff": "3s",
+				"BackoffMultiplier": 2.0,
+				"RetryableStatusCodes": [ "UNAVAILABLE" ]
+			}
+		}`),
 	)
 	if err != nil {
 		log.Fatalf("Failed to dial gRPC server: %v", err)
@@ -528,8 +691,18 @@ func main() {
 		log.Printf("  Failed: %d", op.stats.Failed)
 		log.Printf("  Rate Limited: %d", op.stats.RateLimited)
 		log.Printf("  Getter (Reads): %d", getterCount)
+
+		// Add latency statistics if we have measurements
+		if op.stats.Count > 0 {
+			avgLatency := time.Duration(int64(op.stats.TotalLatency) / int64(op.stats.Count))
+			log.Printf("  Latency Statistics:")
+			log.Printf("    Average: %v", avgLatency)
+			log.Printf("    Min: %v", op.stats.MinLatency)
+			log.Printf("    Max: %v", op.stats.MaxLatency)
+		}
 	}
-	// Add DeleteEvent stats
+
+	// Add DeleteEvent stats with latency
 	total := deleteStats.Success + deleteStats.Failed + deleteStats.RateLimited
 	totalRequests += total
 	totalSuccess += deleteStats.Success
@@ -539,6 +712,14 @@ func main() {
 	log.Printf("  Failed: %d", deleteStats.Failed)
 	log.Printf("  Rate Limited: %d", deleteStats.RateLimited)
 	log.Printf("  Getter (Reads): 0")
+
+	if deleteStats.Count > 0 {
+		avgLatency := time.Duration(int64(deleteStats.TotalLatency) / int64(deleteStats.Count))
+		log.Printf("  Latency Statistics:")
+		log.Printf("    Average: %v", avgLatency)
+		log.Printf("    Min: %v", deleteStats.MinLatency)
+		log.Printf("    Max: %v", deleteStats.MaxLatency)
+	}
 
 	successRate := float64(totalSuccess) / float64(totalRequests) * 100
 	log.Printf("Summary:")
