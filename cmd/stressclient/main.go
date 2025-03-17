@@ -517,15 +517,16 @@ func deleteEvents(ctx context.Context, client api.LiveOpsServiceClient, stats *o
 	for i := 0; i < deleteCount; i++ {
 		// Create a new context with timeout for each delete operation
 		deleteCtx, cancel := context.WithTimeout(ctx, deleteTimeout)
-		defer cancel()
 
 		// Retry loop for delete operation
 		var err error
-		for retry := 0; retry < deleteRetries; retry++ {
+		success := false
+		for retry := 0; retry <= deleteRetries; retry++ {
 			req := &api.DeleteRequest{Id: ids[i]}
 			_, err = client.DeleteEvent(deleteCtx, req)
 			if err == nil {
 				atomic.AddUint64(&stats.Success, 1)
+				success = true
 				break
 			}
 
@@ -533,16 +534,25 @@ func deleteEvents(ctx context.Context, client api.LiveOpsServiceClient, stats *o
 			if st, ok := status.FromError(err); ok {
 				switch st.Code() {
 				case codes.DeadlineExceeded, codes.Unavailable, codes.Internal:
-					log.Printf("Retry %d/%d: Failed to delete event %s: %v", retry+1, deleteRetries, ids[i], err)
-					time.Sleep(time.Second * time.Duration(retry+1)) // Exponential backoff
-					continue
+					if retry < deleteRetries {
+						log.Printf("Retry %d/%d: Failed to delete event %s: %v", retry+1, deleteRetries, ids[i], err)
+						time.Sleep(time.Second * time.Duration(retry+1)) // Exponential backoff
+						continue
+					}
+				case codes.NotFound:
+					// If the event is not found, consider it a success since it's already deleted
+					atomic.AddUint64(&stats.Success, 1)
+					success = true
+					break
 				}
 			}
-			break // Non-retryable error
+			break // Non-retryable error or max retries reached
 		}
 
-		if err != nil {
-			log.Printf("Failed to delete event %s after %d retries: %v", ids[i], deleteRetries, err)
+		cancel() // Cancel the context right after the operation
+
+		if !success {
+			log.Printf("Failed to delete event %s: %v", ids[i], err)
 			atomic.AddUint64(&stats.Failed, 1)
 		}
 	}
